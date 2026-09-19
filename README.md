@@ -14,6 +14,7 @@ master volume, subwoofer level and input selection — and, as of 19 Sep 2026,
 |---|---|---|
 | [`conductor-scp-protocol.md`](conductor-scp-protocol.md) | The protocol specification: physical layer, framing, checksum, registers, write-enable, power-up handshake, open questions | Framing, checksum, level, input-select and write-enable **confirmed on hardware**; boot register meanings partly guessed |
 | [`scp_bench/scp_bench.ino`](scp_bench/scp_bench.ino) | Arduino sketch: ESP32 acts as the knob, driven from the USB serial console | **Working against a real amp.** Read, write-enable, master, sub and input all verified |
+| [`ble_echo/ble_echo.ino`](ble_echo/ble_echo.ino) | Stage 0 BLE bring-up test: Nordic UART Service echo, no SCP involvement | Written, logic unit-tested; **not yet flashed** |
 | `LICENSE` | MIT | — |
 
 ## The protocol in one screen
@@ -148,6 +149,50 @@ command you didn't issue. Raise them only after capturing the real end stops.
 First bring-up is best done with speakers disconnected and no source playing.
 A good first write is a no-op: run `r`, then write back the exact value it
 reported.
+
+## Bluetooth (in progress)
+
+The goal is to drive the bench over BLE instead of USB. `ble_echo/` is step one:
+a standalone sketch that exposes the **Nordic UART Service** and echoes lines
+back in uppercase. It never touches the SCP bus, so if it misbehaves the problem
+is BLE, the board or the partition scheme — not the protocol code.
+
+```
+service  6E400001-B5A3-F393-E0A9-E50E24DCCA9E
+  ...0002...  write   central -> ESP32
+  ...0003...  notify  ESP32 -> central
+```
+
+**Set Tools → Partition Scheme → "Huge APP (3MB No OTA)" before uploading.** The
+BLE stack is ~1.3 MB and the default scheme gives the app only 1.2 MB.
+
+Validate with nRF Connect or LightBlue: scan for `SCP-Bench`, connect, enable
+notifications on the `...0003...` characteristic, write `hello` to `...0002...`,
+expect `HELLO` back. A `beat N` heartbeat every 5 s confirms the notify path
+without typing. USB serial stays live and echoes the same way, so the sketch is
+testable with no phone at all.
+
+### From the Mac
+
+Two scripts in `ble_echo/` drive it from Python using
+[Bleak](https://github.com/hbldh/bleak). They carry
+[PEP 723](https://peps.python.org/pep-0723/) inline dependency metadata, so
+[uv](https://docs.astral.sh/uv/) handles everything — no virtualenv to create,
+activate or clean up:
+
+```
+uv run scan.py        # confirm SCP-Bench is advertising
+uv run echo_test.py   # type a line, get it back uppercased
+```
+
+macOS gates BLE per-application, and a terminal without permission scans
+successfully and finds **nothing, with no error**. If `scan.py` comes back empty,
+grant it in System Settings → Privacy & Security → Bluetooth. Note `SCP-Bench`
+will *not* appear in System Settings → Bluetooth — that panel only lists Classic
+and paired devices, and nothing here needs pairing.
+
+The plan from here: graft the same service onto `scp_bench` so the existing text
+console (`r`, `m 30`, `+`) works unchanged over BLE.
 
 ## Status and next steps
 

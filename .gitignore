@@ -16,3 +16,9 @@ build/
 # Editors
 *.swp
 *~
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
