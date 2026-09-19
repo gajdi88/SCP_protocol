@@ -17,7 +17,8 @@
 // Numbers are DECIMAL unless written 0x.. :
 //   r        read levels          m N   master level       s N   sub level
 //   i N      input (0 main, 1 optical, 2 ext)              + / - master step
-//   e        send write-enable    ?     help
+//   e        send write-enable    d     BLE diagnostics      ?     help
+//   v 0/1    frame tracing off/on (an app sends 'v 0'; default on for USB work)
 //
 // BLE: Nordic UART Service, advertised as "SCP-xxxx" where xxxx is derived from
 // this board's MAC, so several boards are distinguishable. One central at a time;
@@ -30,6 +31,9 @@
 // BEFORE UPLOADING: Tools -> Partition Scheme -> "Huge APP (3MB No OTA)".
 // The BLE stack is ~1.3 MB; the default scheme gives the app only 1.2 MB.
 //
+// v5: 'v' verbosity toggle. Each command otherwise answers with TX/RX/OK, which is
+// ~4 BLE notifications; a slider dragging at 10 Hz would flood the link and the
+// 8-deep command queue. An app sends 'v 0' on connect and gets one line per command.
 // v4: BLE hardening for phone use. Unique name, always returns to advertising
 // (re-armed on disconnect AND by a periodic health check), connection statistics
 // via 'd' so a soak test produces numbers rather than impressions.
@@ -54,6 +58,7 @@ static const uint8_t MAX_SUB    = 0x17;  // 23, from the sub level captures
 
 HardwareSerial &scp = Serial2;
 uint8_t master = 0, sub = 0;
+bool verbose = true;                 // frame tracing; 'v 0' quiets it for app use
 
 // ---- BLE transport -------------------------------------------------------
 // Nordic UART Service. Names are from the PERIPHERAL's point of view: this
@@ -198,8 +203,11 @@ size_t transact(uint8_t cmd, uint8_t reg, const uint8_t *data, uint8_t n, uint8_
   // costs several ms; the amp answers in well under one. Printing first would leave
   // the reply sitting in the UART FIFO while we block. Console output order is
   // unchanged: still TX then RX.
-  dump("TX", req, len);
-  if (r) dump("RX", body, r); else io.print("RX: no valid reply\r\n");
+  if (verbose) {
+    dump("TX", req, len);
+    if (r) dump("RX", body, r);
+  }
+  if (!r) io.print("RX: no valid reply\r\n");   // failures are reported either way
   return r;
 }
 
@@ -296,6 +304,7 @@ void handle(String line) {
     case 'r': ok = readLevels(); break;
     case 'e': ok = enableWrites(); break;
     case 'd': showDiag(); return;
+    case 'v': if (!numOk) { badNum(); break; } verbose = (v != 0); ok = true; break;
     case 'm': if (!numOk) { badNum(); break; } ok = setLevel(0, v); break;
     case 's': if (!numOk) { badNum(); break; } ok = setLevel(1, v); break;
     case 'i': if (!numOk) { badNum(); break; } ok = setInput(v); break;
@@ -303,8 +312,10 @@ void handle(String line) {
       if (!readLevels()) break;                    // always step from the amp's truth
       ok = setLevel(0, (long)master + (c == '+' ? 1 : -1)); break;
     case '?':
-      io.printf("r | e | m N | s N | i N | + | - | d   (N decimal, or 0x.. hex)\r\n"
-                "master 0..%u, sub 0..%u, input 0..2, d = BLE diagnostics\r\n",
+      // The app parses the second line to learn the ceilings, so it stays in step
+      // with this firmware instead of hardcoding them.
+      io.printf("r | e | m N | s N | i N | + | - | d | v 0/1  (N decimal, or 0x.. hex)\r\n"
+                "master 0..%u, sub 0..%u, input 0..2\r\n",
                 MAX_MASTER, MAX_SUB);
       return;
     default: return;                               // ignore line noise
@@ -351,7 +362,7 @@ void setup() {
   scp.begin(230400, SERIAL_8N1, PIN_RX, PIN_TX);
   delay(500);
   startBle();
-  Serial.printf("\r\nSCP bench v4 ready, advertising as \"%s\". '?' for help.\r\n", deviceName);
+  Serial.printf("\r\nSCP bench v5 ready, advertising as \"%s\". '?' for help.\r\n", deviceName);
 }
 
 void loop() {

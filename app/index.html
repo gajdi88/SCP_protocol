@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#111417">
+<meta name="mobile-web-app-capable" content="content">
+<title>MATCH UP 8DSP</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='14' fill='%23111417' stroke='%234a9eff' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='3' fill='%234a9eff'/%3E%3Crect x='15' y='4' width='2' height='7' rx='1' fill='%234a9eff'/%3E%3C/svg%3E">
+<style>
+  :root {
+    --bg:#111417; --panel:#1a1f24; --line:#2a3138;
+    --text:#e8edf2; --dim:#8b97a3; --accent:#4a9eff;
+    --main:#3ecf7e; --optical:#f5c542; --ext:#4a9eff;
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  body {
+    margin:0; padding:16px; padding-bottom:max(16px,env(safe-area-inset-bottom));
+    background:var(--bg); color:var(--text); font:16px/1.4 -apple-system,system-ui,"Segoe UI",Roboto,sans-serif;
+    max-width:520px; margin-inline:auto; min-height:100vh;
+  }
+  header { display:flex; align-items:center; justify-content:space-between; gap:12px; margin-bottom:16px; }
+  h1 { font-size:15px; font-weight:600; margin:0; letter-spacing:.02em; }
+  h1 span { color:var(--dim); font-weight:400; }
+  #conn {
+    font:600 13px/1 inherit; padding:10px 16px; border-radius:99px; border:1px solid var(--line);
+    background:var(--panel); color:var(--text); cursor:pointer;
+  }
+  #conn.on { border-color:var(--main); color:var(--main); }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; margin-bottom:14px; }
+  .row { display:flex; align-items:baseline; justify-content:space-between; margin-bottom:14px; }
+  .label { font-size:13px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; }
+  .val { font-variant-numeric:tabular-nums; font-weight:600; }
+  #mval { font-size:44px; line-height:1; }
+  #sval { font-size:30px; line-height:1; }
+  .val small { font-size:13px; color:var(--dim); font-weight:400; margin-left:4px; }
+  input[type=range] { -webkit-appearance:none; appearance:none; width:100%; height:36px; background:transparent; margin:0; }
+  input[type=range]::-webkit-slider-runnable-track { height:10px; border-radius:5px; background:var(--line); }
+  input[type=range]::-moz-range-track { height:10px; border-radius:5px; background:var(--line); }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance:none; appearance:none; width:32px; height:32px; margin-top:-11px;
+    border-radius:50%; background:var(--accent); border:3px solid var(--panel);
+  }
+  input[type=range]::-moz-range-thumb {
+    width:26px; height:26px; border-radius:50%; background:var(--accent); border:3px solid var(--panel);
+  }
+  input[type=range]:disabled::-webkit-slider-thumb { background:var(--dim); }
+  input[type=range]:disabled::-moz-range-thumb { background:var(--dim); }
+  .inputs { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; }
+  .inputs button {
+    padding:16px 6px; border-radius:11px; border:1px solid var(--line); background:transparent;
+    color:var(--dim); font:600 13px/1.3 inherit; cursor:pointer; display:grid; gap:7px; justify-items:center;
+  }
+  .dot { width:11px; height:11px; border-radius:50%; background:currentColor; }
+  .inputs button[data-i="0"] { --c:var(--main); }
+  .inputs button[data-i="1"] { --c:var(--optical); }
+  .inputs button[data-i="2"] { --c:var(--ext); }
+  .inputs button .dot { color:var(--c); }
+  .inputs button.sel { border-color:var(--c); color:var(--c); background:color-mix(in srgb, var(--c) 12%, transparent); }
+  .inputs button:disabled { opacity:.4; }
+  #status { font-size:12.5px; color:var(--dim); text-align:center; min-height:1.4em; margin-top:2px; }
+  #status.err { color:#ff6b6b; }
+  .hint { font-size:12px; color:var(--dim); margin-top:10px; }
+  body.off .card { opacity:.5; }
+</style>
+</head>
+<body class="off">
+
+<header>
+  <h1>MATCH UP 8DSP <span id="dev"></span></h1>
+  <button id="conn">Connect</button>
+</header>
+
+<div class="card">
+  <div class="row"><span class="label">Volume</span><span class="val" id="mval">--</span></div>
+  <input type="range" id="mslider" min="0" max="41" value="0" step="1" disabled>
+</div>
+
+<div class="card">
+  <div class="row"><span class="label">Subwoofer</span><span class="val" id="sval">--</span></div>
+  <input type="range" id="sslider" min="0" max="23" value="0" step="1" disabled>
+</div>
+
+<div class="card">
+  <div class="row"><span class="label">Input</span></div>
+  <div class="inputs">
+    <button data-i="0" disabled><span class="dot"></span>Main</button>
+    <button data-i="1" disabled><span class="dot"></span>Optical</button>
+    <button data-i="2" disabled><span class="dot"></span>Extension</button>
+  </div>
+  <div class="hint">The amp does not report the selected input, so this shows what
+    this app last sent, not necessarily the amp's state.</div>
+</div>
+
+<div id="status">Not connected</div>
+
+<script>
+'use strict';
+// Nordic UART Service. Names are from the PERIPHERAL's point of view: the ESP32
+// receives on RX and notifies on TX, so we write to RX and subscribe to TX.
+const NUS = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const RX  = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+const TX  = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
+
+const $ = id => document.getElementById(id);
+const els = {
+  conn:$('conn'), dev:$('dev'), status:$('status'),
+  m:$('mslider'), s:$('sslider'), mval:$('mval'), sval:$('sval'),
+  buttons:[...document.querySelectorAll('.inputs button')],
+};
+
+let device = null, rxChar = null, connected = false;
+
+function setStatus(msg, isErr) {
+  els.status.textContent = msg;
+  els.status.classList.toggle('err', !!isErr);
+}
+
+function setConnected(on) {
+  connected = on;
+  document.body.classList.toggle('off', !on);
+  els.conn.textContent = on ? 'Disconnect' : 'Connect';
+  els.conn.classList.toggle('on', on);
+  [els.m, els.s, ...els.buttons].forEach(e => e.disabled = !on);
+  if (!on) { els.dev.textContent = ''; els.buttons.forEach(b => b.classList.remove('sel')); }
+}
+
+// ---- transport ----------------------------------------------------------
+// Web Bluetooth rejects overlapping GATT operations, so every write goes through
+// one promise chain rather than being fired off concurrently.
+let chain = Promise.resolve();
+function send(cmd) {
+  if (!rxChar) return Promise.resolve();
+  chain = chain
+    .then(() => {
+      const data = new TextEncoder().encode(cmd + '\n');
+      return rxChar.writeValueWithResponse
+        ? rxChar.writeValueWithResponse(data)
+        : rxChar.writeValue(data);
+    })
+    .catch(e => setStatus('write failed: ' + e.message, true));
+  return chain;
+}
+
+// Notifications arrive in 20-byte pieces, so reassemble them into whole lines
+// before anything tries to parse them.
+let lineBuf = '';
+function onNotify(e) {
+  lineBuf += new TextDecoder().decode(e.target.value);
+  let i;
+  while ((i = lineBuf.search(/[\r\n]/)) >= 0) {
+    const line = lineBuf.slice(0, i).trim();
+    lineBuf = lineBuf.slice(i + 1);
+    if (line) onLine(line);
+  }
+  if (lineBuf.length > 512) lineBuf = '';        // never grow without bound
+}
+
+function onLine(line) {
+  // "master 0..41, sub 0..23, input 0..2" - take the ceilings from the firmware
+  // rather than hardcoding them, so the app cannot drift out of step with it.
+  let m = line.match(/master\s+0\.\.(\d+),\s*sub\s+0\.\.(\d+)/);
+  if (m) { els.m.max = m[1]; els.s.max = m[2]; return; }
+
+  // "master=30 (0x1E)  sub=23 (0x17)"
+  m = line.match(/master=(\d+).*sub=(\d+)/);
+  if (m) {
+    if (!dragging.m) { els.m.value = m[1]; paint('m', +m[1]); }
+    if (!dragging.s) { els.s.value = m[2]; paint('s', +m[2]); }
+    setStatus('Connected');
+    return;
+  }
+  if (/no valid reply/i.test(line)) setStatus('No answer from the amp — is it powered?', true);
+  else if (/^REFUSED/i.test(line))  setStatus(line, true);
+}
+
+// ---- control ------------------------------------------------------------
+function paint(which, v) {
+  const max = which === 'm' ? els.m.max : els.s.max;
+  (which === 'm' ? els.mval : els.sval).innerHTML = v + '<small>/' + max + '</small>';
+}
+
+// A drag fires continuously. Sending per event would flood BLE and overrun the
+// ESP32's 8-deep command queue, so coalesce to one write per interval and always
+// send the final value when the thumb is released.
+const RATE = 120;
+const dragging = {m:false, s:false};
+const queued = {m:null, s:null};
+let timer = null;
+
+function flush() {
+  timer = null;
+  for (const k of ['m', 's']) {
+    if (queued[k] === null) continue;
+    send((k === 'm' ? 'm ' : 's ') + queued[k]);
+    queued[k] = null;
+  }
+}
+
+function schedule(which, v) {
+  queued[which] = v;
+  if (!timer) timer = setTimeout(flush, RATE);
+}
+
+for (const [which, el] of [['m', els.m], ['s', els.s]]) {
+  el.addEventListener('pointerdown', () => dragging[which] = true);
+  el.addEventListener('input', () => { paint(which, +el.value); schedule(which, +el.value); });
+  el.addEventListener('change', () => {                  // released: send the truth
+    dragging[which] = false;
+    queued[which] = null;
+    if (timer) { clearTimeout(timer); timer = null; }
+    send((which === 'm' ? 'm ' : 's ') + el.value);
+  });
+}
+
+els.buttons.forEach(b => b.addEventListener('click', () => {
+  els.buttons.forEach(o => o.classList.toggle('sel', o === b));
+  send('i ' + b.dataset.i);
+}));
+
+// ---- connection ---------------------------------------------------------
+function onDisconnected() {
+  rxChar = null;
+  setConnected(false);
+  setStatus('Disconnected');
+}
+
+async function connect() {
+  if (!navigator.bluetooth) {
+    setStatus('This browser has no Web Bluetooth. Use Chrome on Android.', true);
+    return;
+  }
+  try {
+    setStatus('Choose the amp…');
+    device = await navigator.bluetooth.requestDevice({
+      filters: [{ namePrefix: 'SCP-' }],
+      optionalServices: [NUS],
+    });
+    device.addEventListener('gattserverdisconnected', onDisconnected);
+
+    setStatus('Connecting…');
+    const server = await device.gatt.connect();
+    const svc = await server.getPrimaryService(NUS);
+    rxChar = await svc.getCharacteristic(RX);
+    const txChar = await svc.getCharacteristic(TX);
+    await txChar.startNotifications();
+    txChar.addEventListener('characteristicvaluechanged', onNotify);
+
+    els.dev.textContent = device.name || '';
+    setConnected(true);
+    setStatus('Reading levels…');
+
+    await send('v 0');   // quiet mode: one line per command instead of four
+    await send('?');     // learn this firmware's ceilings
+    await send('r');     // the amp is the source of truth for the sliders
+  } catch (e) {
+    rxChar = null;
+    setConnected(false);
+    setStatus(e.name === 'NotFoundError' ? 'No amp chosen' : e.message, e.name !== 'NotFoundError');
+  }
+}
+
+els.conn.addEventListener('click', () => {
+  if (connected) { device && device.gatt.connected && device.gatt.disconnect(); onDisconnected(); }
+  else connect();
+});
+
+setConnected(false);
+</script>
+</body>
+</html>

@@ -14,6 +14,7 @@ master volume, subwoofer level and input selection — and, as of 19 Sep 2026,
 |---|---|---|
 | [`conductor-scp-protocol.md`](conductor-scp-protocol.md) | The protocol specification: physical layer, framing, checksum, registers, write-enable, power-up handshake, open questions | Framing, checksum, level, input-select and write-enable **confirmed on hardware**; boot register meanings partly guessed |
 | [`scp_bench/scp_bench.ino`](scp_bench/scp_bench.ino) | Arduino sketch: ESP32 acts as the knob, driven from an identical console over **USB serial and BLE** | **Working against a real amp.** Read, write-enable, master, sub and input all verified |
+| [`app/`](app/) | Single-screen Web Bluetooth dashboard for Android: volume, sub and input | **Working.** Served from GitHub Pages, added to the home screen as a PWA |
 | [`ble_echo/ble_echo.ino`](ble_echo/ble_echo.ino) | Stage 0 BLE bring-up test: Nordic UART Service echo, no SCP involvement | Written, logic unit-tested; **not yet flashed** |
 | `LICENSE` | MIT | — |
 
@@ -147,6 +148,7 @@ completely is refused, not read as zero.
 | `+` / `-` | Step master up / down by one, always re-reading the amp first |
 | `e` | Send the write-enable (register 01) |
 | `d` | BLE diagnostics: name, link state, connect/drop counts, session times, heap |
+| `v 0` / `v 1` | Frame tracing off / on. An app sends `v 0`; default is on for USB work |
 | `?` | Help, including the current ceilings |
 
 Writes **auto-enable and retry once** on seeing the rejection frame, so `m` /
@@ -229,6 +231,13 @@ session 00:04:12   longest 00:31:05   heap 142312
 
 A phone that walks out of range is not reported as dropped until the BLE
 supervision timeout expires, so expect a drop to lag the event by a few seconds.
+
+### The phone app
+
+[`app/`](app/) is a single-screen dashboard — volume, sub, input — as one
+self-contained HTML file using Web Bluetooth. No APK and no Android toolchain:
+serve it from GitHub Pages, open it in Chrome on Android and add it to the home
+screen. See [`app/README.md`](app/README.md) for setup.
 
 ### Android notes
 
