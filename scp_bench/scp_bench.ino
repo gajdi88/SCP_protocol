@@ -19,12 +19,20 @@
 //   i N      input (0 main, 1 optical, 2 ext)              + / - master step
 //   e        send write-enable    ?     help
 //
-// BLE: Nordic UART Service, advertised as "SCP-Bench". Drive it with
-// ble_echo/echo_test.py on the Mac, or any NUS terminal (nRF Connect, LightBlue).
+// BLE: Nordic UART Service, advertised as "SCP-xxxx" where xxxx is derived from
+// this board's MAC, so several boards are distinguishable. One central at a time;
+// any phone may take the link once the previous one drops. Open, no pairing.
+// Drive it with ble_echo/echo_test.py, or any NUS terminal (nRF Connect on Android).
+//
+// PIN_RX/PIN_TX below are for a WROOM-32. On an S3/C3/C6 pick free pins; the UART
+// matrix will route Serial2 anywhere, and the BLE code here is variant-independent.
 //
 // BEFORE UPLOADING: Tools -> Partition Scheme -> "Huge APP (3MB No OTA)".
 // The BLE stack is ~1.3 MB; the default scheme gives the app only 1.2 MB.
 //
+// v4: BLE hardening for phone use. Unique name, always returns to advertising
+// (re-armed on disconnect AND by a periodic health check), connection statistics
+// via 'd' so a soak test produces numbers rather than impressions.
 // v3: BLE console alongside USB. v2: write-enable handling, separate master/sub
 // ceilings, strict numeric parsing. See git history for the bench results behind each.
 
@@ -54,7 +62,7 @@ uint8_t master = 0, sub = 0;
 #define NUS_RX      "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"   // central writes here
 #define NUS_TX      "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"   // we notify here
 
-static const char  *DEVICE_NAME = "SCP-Bench";
+char deviceName[16] = "SCP-????";     // filled from the MAC in setup()
 static const size_t CHUNK    = 20;    // safe notify payload at the default 23-byte MTU
 static const size_t MAX_LINE = 32;    // console commands are short
 
@@ -63,7 +71,13 @@ struct Line { char text[MAX_LINE]; };
 BLECharacteristic *txChar = nullptr;
 QueueHandle_t      lineQ  = nullptr;
 volatile bool      bleConnected  = false;
+volatile bool      advertising   = false;
 volatile bool      needAdvertise = false;
+
+// Connection statistics. A soak test is only worth running if it produces numbers,
+// so every connect and drop is counted and timed; 'd' prints them.
+uint32_t bleConnects = 0, bleDisconnects = 0;
+uint32_t connectedAtMs = 0, lastSessionMs = 0, longestSessionMs = 0;
 
 // Tees console output to USB serial and, when a central is attached, to a BLE
 // notify. Buffers a whole line and sends it as chunks: one notify per byte would
@@ -94,9 +108,21 @@ public:
 Console io;
 
 class ServerCB : public BLEServerCallbacks {
-  void onConnect(BLEServer *) override    { bleConnected = true;  Serial.print("BLE connected\r\n"); }
-  void onDisconnect(BLEServer *) override { bleConnected = false; needAdvertise = true;
-                                            Serial.print("BLE disconnected\r\n"); }
+  void onConnect(BLEServer *) override {
+    bleConnected = true;
+    advertising  = false;            // the stack stops advertising on connect
+    bleConnects++;
+    connectedAtMs = millis();
+    Serial.print("BLE connected\r\n");
+  }
+  void onDisconnect(BLEServer *) override {
+    bleConnected = false;
+    bleDisconnects++;
+    lastSessionMs = millis() - connectedAtMs;
+    if (lastSessionMs > longestSessionMs) longestSessionMs = lastSessionMs;
+    needAdvertise = true;            // loop() re-arms it; doing it here is flaky
+    Serial.print("BLE disconnected\r\n");
+  }
 };
 
 // A BLE callback must never do slow work: readReply() blocks for up to 50 ms, and
@@ -128,6 +154,11 @@ class RxCB : public BLECharacteristicCallbacks {
     len = 0;
   }
 };
+
+void beginAdvertising() {
+  BLEDevice::startAdvertising();
+  advertising = true;
+}
 
 // ---- framing -------------------------------------------------------------
 // request: 42 LEN ~LEN 01 CMD REG data... CS     LEN = 3 + ndata, CS = CMD+REG+data
@@ -232,6 +263,26 @@ bool parseNum(const String &s, long &out) {
   out = v; return true;
 }
 
+void printDuration(uint32_t ms) {
+  uint32_t s = ms / 1000;
+  io.printf("%02u:%02u:%02u", (unsigned)(s / 3600), (unsigned)((s / 60) % 60), (unsigned)(s % 60));
+}
+
+// Everything a soak test needs: is it reachable, how often has the link dropped,
+// and how long does it survive. A phone that walks out of range is not reported
+// until the supervision timeout expires, so a drop can lag the event by seconds.
+void showDiag() {
+  uint32_t now = millis();
+  io.printf("name %s   connected %s   advertising %s\r\n",
+            deviceName, bleConnected ? "yes" : "no", advertising ? "yes" : "no");
+  io.print("uptime ");  printDuration(now);
+  io.printf("   connects %lu   drops %lu\r\n",
+            (unsigned long)bleConnects, (unsigned long)bleDisconnects);
+  io.print("session "); printDuration(bleConnected ? now - connectedAtMs : lastSessionMs);
+  io.print("   longest "); printDuration(longestSessionMs);
+  io.printf("   heap %lu\r\n", (unsigned long)ESP.getFreeHeap());
+}
+
 void badNum() { io.print("REFUSED: need a number, e.g. 'm 30' or 'm 0x1E'\r\n"); }
 
 void handle(String line) {
@@ -244,6 +295,7 @@ void handle(String line) {
   switch (c) {
     case 'r': ok = readLevels(); break;
     case 'e': ok = enableWrites(); break;
+    case 'd': showDiag(); return;
     case 'm': if (!numOk) { badNum(); break; } ok = setLevel(0, v); break;
     case 's': if (!numOk) { badNum(); break; } ok = setLevel(1, v); break;
     case 'i': if (!numOk) { badNum(); break; } ok = setInput(v); break;
@@ -251,8 +303,9 @@ void handle(String line) {
       if (!readLevels()) break;                    // always step from the amp's truth
       ok = setLevel(0, (long)master + (c == '+' ? 1 : -1)); break;
     case '?':
-      io.printf("r | e | m N | s N | i N | + | -   (N decimal, or 0x.. hex)\r\n"
-                "master 0..%u, sub 0..%u, input 0..2\r\n", MAX_MASTER, MAX_SUB);
+      io.printf("r | e | m N | s N | i N | + | - | d   (N decimal, or 0x.. hex)\r\n"
+                "master 0..%u, sub 0..%u, input 0..2, d = BLE diagnostics\r\n",
+                MAX_MASTER, MAX_SUB);
       return;
     default: return;                               // ignore line noise
   }
@@ -263,7 +316,14 @@ void handle(String line) {
 void startBle() {
   lineQ = xQueueCreate(8, sizeof(Line));
 
-  BLEDevice::init(DEVICE_NAME);
+  // Name the board after its own MAC so several units are distinguishable and the
+  // name survives reflashing. Folding all 48 bits means whichever bytes actually
+  // vary between boards, the tag varies with them.
+  uint64_t mac = ESP.getEfuseMac();
+  uint16_t tag = (uint16_t)(mac >> 32) ^ (uint16_t)(mac >> 16) ^ (uint16_t)mac;
+  snprintf(deviceName, sizeof deviceName, "SCP-%04X", tag);
+
+  BLEDevice::init(deviceName);
   BLEServer *server = BLEDevice::createServer();
   server->setCallbacks(new ServerCB());
 
@@ -283,7 +343,7 @@ void startBle() {
   BLEAdvertising *adv = BLEDevice::getAdvertising();
   adv->addServiceUUID(NUS_SERVICE);
   adv->setScanResponse(true);
-  BLEDevice::startAdvertising();
+  beginAdvertising();
 }
 
 void setup() {
@@ -291,7 +351,7 @@ void setup() {
   scp.begin(230400, SERIAL_8N1, PIN_RX, PIN_TX);
   delay(500);
   startBle();
-  Serial.printf("\r\nSCP bench v3 ready, advertising as \"%s\". '?' for help.\r\n", DEVICE_NAME);
+  Serial.printf("\r\nSCP bench v4 ready, advertising as \"%s\". '?' for help.\r\n", deviceName);
 }
 
 void loop() {
@@ -315,8 +375,20 @@ void loop() {
   if (needAdvertise) {
     needAdvertise = false;
     delay(200);                                    // let the stack tear the link down
-    BLEDevice::startAdvertising();
+    beginAdvertising();
     Serial.print("re-advertising\r\n");
+  }
+
+  // 4. belt and braces: if we are neither connected nor advertising, nobody can
+  //    ever reach us again. Cheap to check, and it recovers from a missed or
+  //    failed re-arm without needing to know why it happened.
+  static uint32_t lastAdvCheck = 0;
+  if (millis() - lastAdvCheck > 2000) {
+    lastAdvCheck = millis();
+    if (!bleConnected && !advertising) {
+      beginAdvertising();
+      Serial.print("advertising restarted by health check\r\n");
+    }
   }
 
   delay(5);                                        // yield to the BLE task

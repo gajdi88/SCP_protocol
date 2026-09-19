@@ -126,9 +126,14 @@ battery, or use a USB isolator.
 ### Console commands
 
 The same console is live on **USB serial and BLE at once**, so you can drive the
-amp from the Mac while watching the frame trace on USB. Over BLE it advertises
-as `SCP-Bench` on the Nordic UART Service; `ble_echo/echo_test.py` works as a
-BLE terminal against it unchanged.
+amp from a phone or Mac while watching the frame trace on USB. Over BLE it
+advertises on the Nordic UART Service as **`SCP-xxxx`**, where `xxxx` is derived
+from the board's own MAC — so several boards are distinguishable and the name
+survives reflashing. `ble_echo/echo_test.py` works as a BLE terminal against it;
+pass a name (`uv run echo_test.py SCP-1A2B`) if more than one is in range.
+
+**One central at a time, no pairing.** Any phone may take the link once the
+previous one has dropped.
 
 `N` is **decimal**, or hex when written `0x..`. A value that doesn't parse
 completely is refused, not read as zero.
@@ -141,6 +146,7 @@ completely is refused, not read as zero.
 | `i N` | Select input `N` (0 main, 1 optical, 2 extension) |
 | `+` / `-` | Step master up / down by one, always re-reading the amp first |
 | `e` | Send the write-enable (register 01) |
+| `d` | BLE diagnostics: name, link state, connect/drop counts, session times, heap |
 | `?` | Help, including the current ceilings |
 
 Writes **auto-enable and retry once** on seeing the rejection frame, so `m` /
@@ -204,6 +210,37 @@ and paired devices, and nothing here needs pairing.
 `scp_bench` now carries the same service, so the whole console works over BLE.
 `ble_echo/` is kept as an isolation tool: if BLE misbehaves later, it tells you
 whether the problem is BLE or the protocol code.
+
+### Staying reachable
+
+The firmware's job is to never become invisible. Advertising stops whenever a
+central connects, so it is re-armed on disconnect **and** by a health check every
+2 s that restarts it whenever the device is neither connected nor advertising.
+That recovers a failed or missed re-arm without needing to know why it happened.
+
+`d` reports what a soak test needs — uptime, connect and drop counts, current and
+longest session, free heap:
+
+```
+name SCP-1A2B   connected yes   advertising no
+uptime 01:12:40   connects 14   drops 13
+session 00:04:12   longest 00:31:05   heap 142312
+```
+
+A phone that walks out of range is not reported as dropped until the BLE
+supervision timeout expires, so expect a drop to lag the event by a few seconds.
+
+### Android notes
+
+Prove the link with **nRF Connect** before writing any app — it avoids Android's
+runtime Bluetooth permissions entirely while you are still testing the firmware.
+
+The trap to know about is that **Android caches a device's GATT database per
+address.** If you change the service or characteristic layout and reflash, Android
+may keep serving your phone the stale cached copy: characteristics missing,
+notifications silently dead, while another phone works fine. "Forget device" in
+Android's Bluetooth settings clears it. The layout here is stable, so this should
+only bite while developing.
 
 ## Status and next steps
 

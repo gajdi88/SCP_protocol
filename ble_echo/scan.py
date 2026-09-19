@@ -15,7 +15,7 @@ import sys
 
 from bleak import BleakScanner
 
-TARGET = "SCP-Bench"
+PREFIX = "SCP-"   # the bench advertises as SCP-<4 hex from its MAC>
 
 
 async def main() -> int:
@@ -28,20 +28,25 @@ async def main() -> int:
         print("  System Settings -> Privacy & Security -> Bluetooth -> enable your terminal")
         return 1
 
-    hit = None
+    hits = []
     for d in sorted(devices, key=lambda x: (x.name or "").lower()):
         name = d.name or "(no name)"
         mark = ""
-        if d.name == TARGET:
-            hit, mark = d, "   <-- this is the ESP32"
+        if d.name and d.name.startswith(PREFIX):
+            hits.append(d)
+            mark = "   <-- this is the ESP32"
         print(f"  {name:<28} {d.address}{mark}")
 
     print()
-    if hit:
-        print(f"Found {TARGET}. Next: uv run echo_test.py")
+    if len(hits) == 1:
+        print(f"Found {hits[0].name}. Next: uv run echo_test.py")
         return 0
-    print(f"{len(devices)} device(s) seen, but no {TARGET!r}.")
-    print("Check the ESP32's USB serial for 'advertising as \"SCP-Bench\"',")
+    if len(hits) > 1:
+        print(f"Found {len(hits)} benches: {', '.join(d.name for d in hits)}")
+        print("Pick one by name: uv run echo_test.py SCP-XXXX")
+        return 0
+    print(f"{len(devices)} device(s) seen, but nothing starting {PREFIX!r}.")
+    print("Check the ESP32's USB serial for 'advertising as ...',")
     print("and make sure nothing else (a phone) is already connected to it.")
     return 1
 
