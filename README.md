@@ -4,23 +4,24 @@ Reverse engineering the SCP bus between a **MATCH UP 8DSP MK2** amplifier and an
 **Audiotec Fischer CONDUCTOR** volume knob, and replacing the knob with an ESP32.
 
 The knob talks to the amp over a 4-pin Micro-Fit connector carrying two
-unidirectional UART lines. The protocol has been decoded from logic-analyser
-captures far enough to read and write master volume, subwoofer level and input
-selection. This repo holds the protocol notes and a bench sketch that speaks it.
+unidirectional UART lines. The protocol is decoded far enough to read and write
+master volume, subwoofer level and input selection — and, as of 19 Sep 2026,
+**an ESP32 has successfully driven a real amplifier with the knob unplugged.**
 
 ## What is here
 
 | Path | What it is | State |
 |---|---|---|
-| [`conductor-scp-protocol.md`](conductor-scp-protocol.md) | The protocol specification: physical layer, framing, checksum, registers, power-up handshake, open questions | Physical layer, framing, checksum, level and input commands **confirmed**; boot register meanings partly guessed |
-| [`scp_bench/scp_bench.ino`](scp_bench/scp_bench.ino) | Arduino sketch: ESP32 acts as the knob, driven from the USB serial console | Written, framing verified against the spec on paper — **not yet run against real hardware** |
+| [`conductor-scp-protocol.md`](conductor-scp-protocol.md) | The protocol specification: physical layer, framing, checksum, registers, write-enable, power-up handshake, open questions | Framing, checksum, level, input-select and write-enable **confirmed on hardware**; boot register meanings partly guessed |
+| [`scp_bench/scp_bench.ino`](scp_bench/scp_bench.ino) | Arduino sketch: ESP32 acts as the knob, driven from the USB serial console | **Working against a real amp.** Read, write-enable, master, sub and input all verified |
 | `LICENSE` | MIT | — |
 
 ## The protocol in one screen
 
 Plain full-duplex UART, **230400 baud, 8N1, 3.3 V, idle high**. The knob is the
-master; the amp only ever answers. Levels are sent as **absolute values**, not
-up/down steps, and the amp echoes every write.
+master; the amp only ever answers, and never speaks unprompted. Levels are sent
+as **absolute values**, not up/down steps, and the amp echoes every accepted
+write.
 
 ```
 SOF  LEN  ~LEN  01  CMD  REG  data…  CS
@@ -32,15 +33,32 @@ SOF  LEN  ~LEN  01  CMD  REG  data…  CS
 - `CMD` — `2A` read, `2B` write
 - `CS` — sum of `CMD` through the last data byte, mod 256 (the `01` is **not** counted)
 
-Ready-made frames:
+### Writes are gated
+
+**Reads work at any time. Writes are rejected until register 01 is enabled, and
+the amp forgets the enable on every power-cycle.**
+
+A write attempted while disabled is answered with `01 2B 01 00 2C` — the amp
+reports register 01's value instead of echoing your frame, so the rejection is
+self-identifying. Send the enable and retry:
+
+```
+42 05 FA 01 2B 01 01 01 2E
+```
+
+A controller should react to the rejection frame rather than track amp power
+state — that also covers the amp restarting with the ignition.
+
+### Ready-made frames
 
 | Purpose | Bytes |
 |---|---|
 | Read current levels | `42 03 FC 01 2A 04 2E` |
+| Write enable (needed after every amp power-up) | `42 05 FA 01 2B 01 01 01 2E` |
+| Amp's "writes not enabled" reply body | `01 2B 01 00 2C` |
 | Set master to `vv` | `42 06 F9 01 2B 04 00 vv 01 cs`, `cs = 30 + vv` |
 | Set sub to `vv` | `42 06 F9 01 2B 04 01 vv 01 cs`, `cs = 31 + vv` |
 | Select input `ii` | `42 06 F9 01 2B 07 ii 01 01 cs`, `cs = 34 + ii` |
-| Boot "enable" write | `42 05 FA 01 2B 01 01 01 2E` |
 
 Inputs: `00` main / analogue highlevel (green), `01` optical (yellow),
 `02` extension card slot (blue). For the amp to obey an input write, the digital
@@ -52,29 +70,42 @@ register 03 configuration dump, and what is still unknown.
 
 ## Running the bench sketch
 
-**Prerequisites:** ESP32 board (any dev board with a spare UART), Arduino IDE or
-arduino-cli with the ESP32 core installed.
+**Prerequisites:** ESP32 board with a spare UART, Arduino IDE or arduino-cli
+with the ESP32 core. Verified on an ESP-WROOM-32 using UART2.
 
-Open `scp_bench/scp_bench.ino`, select your ESP32 board, upload, then open the
-serial monitor at **115200 baud**.
+> On an **ESP32-WROVER**, GPIO16/17 are wired to the PSRAM die — move `PIN_RX` /
+> `PIN_TX` to free pins. The ESP32 UART matrix will route Serial2 anywhere.
+
+Open `scp_bench/scp_bench.ino`, select your board, upload, then open the serial
+monitor at **115200 baud**.
 
 ### Wiring — knob UNPLUGGED
 
-Two push-pull UART transmitters on one wire will fight each other, so the knob
-must be disconnected before the ESP32 drives the knob→amp line.
+Two push-pull UART transmitters on one wire will fight, so the knob must be
+disconnected before the ESP32 drives the knob→amp line.
 
 ```
 SCP GND                    -> ESP32 GND
-amp TX  (analyser D0 line) -> 470R -> GPIO16 (RX2)
-amp RX  (analyser D2 line) <- 470R <- GPIO17 (TX2)
+amp TX  (analyser D0 line) -> 1k -> GPIO16 (RX2)
+amp RX  (analyser D2 line) <- 1k <- GPIO17 (TX2)
 SCP 3.3 V rail             -> leave open
 ```
 
-> **Not yet determined:** which physical Micro-Fit pin carries D0 and which
-> carries D2. Identify them with a scope or analyser before connecting, and
-> record the answer in the spec.
+The series resistors are what make a wiring mistake survivable: within the
+3.3 V domain, worst-case contention current is ~3.3 mA, safe on both ends.
+
+Before connecting, DMM every Micro-Fit pin against ground with the amp powered.
+You should find exactly two data lines near 3.3 V, one 3.3 V rail and one
+ground. **If any pin reads 12 V, the pinout assumption is wrong — stop.**
+
+Watch for ground loops: if your PC and the amp's supply are both mains-earthed,
+joining the grounds puts current through your USB cable. Run the laptop on
+battery, or use a USB isolator.
 
 ### Console commands
+
+`N` is **decimal**, or hex when written `0x..`. A value that doesn't parse
+completely is refused, not read as zero.
 
 | Key | Action |
 |---|---|
@@ -82,38 +113,53 @@ SCP 3.3 V rail             -> leave open
 | `m N` | Set master volume to `N` |
 | `s N` | Set sub level to `N` |
 | `i N` | Select input `N` (0 main, 1 optical, 2 extension) |
-| `+` / `-` | Step master up / down by one |
-| `e` | Send the boot "enable" write (register 01) |
+| `+` / `-` | Step master up / down by one, always re-reading the amp first |
+| `e` | Send the write-enable (register 01) |
+| `?` | Help, including the current ceilings |
 
-`N` is parsed as **decimal**, while the spec is written in hex. `m 40` means
-master = `0x28`.
+Writes **auto-enable and retry once** on seeing the rejection frame, so `m` /
+`s` / `i` work without sending `e` by hand.
 
 Every transaction prints the transmitted frame (`TX`) and the decoded reply body
-(`RX`), so the console doubles as a protocol trace. The sketch clamps levels to
-`MAX_LEVEL` (`0x30`) as a safety limit, because the real end stops have not been
-captured yet.
+(`RX`), so the console doubles as a protocol trace.
+
+### Level ceilings
+
+Master and sub have **separate** limits, each set to the highest value ever
+observed for that target — `MAX_MASTER = 0x29` (41) and `MAX_SUB = 0x17` (23).
+Out-of-range values are **refused, not clamped**, so you never get an `OK` for a
+command you didn't issue. Raise them only after capturing the real end stops.
+
+First bring-up is best done with speakers disconnected and no source playing.
+A good first write is a no-op: run `r`, then write back the exact value it
+reported.
 
 ## Status and next steps
 
-The protocol is understood well enough to control the amp; the bench sketch has
-never been run against hardware. Bring-up order:
+The protocol is proven end-to-end for level and input control. What remains:
 
-1. Identify the D0/D2 Micro-Fit pins and record them in the spec.
-2. Run `r` with the knob unplugged. A valid reply confirms wiring, baud rate and
-   framing in one step.
-3. Answer the spec's [open questions](conductor-scp-protocol.md#8-open-questions-and-next-captures)
-   on the bench — chiefly whether level writes work without the boot handshake,
-   whether the ~0.6 ms intra-frame pause matters, and where the level end stops are.
+1. **Record which physical Micro-Fit pin is D0 and which is D2.** Still missing
+   from §2 of the spec, and it's the one fact that makes the wiring above
+   reproducible.
+2. Confirm in PC-Tool that an echoed input write actually **switches** the amp —
+   the echo so far only proves the frame was accepted.
+3. Capture the real master and sub end stops, then raise the ceilings.
+4. Work the remaining [open questions](conductor-scp-protocol.md#8-open-questions-and-next-captures):
+   the contents of registers 00, 03, 05, 06, 09, the meaning of the constant
+   `01` bytes, and whether the amp ever speaks unprompted.
+
+Beyond the bench: the middle position from §7 — knob TX → ESP32 → amp, treating
+knob frames as ±1 deltas — needs a second UART and is not implemented yet.
 
 ## Credits and caveats
 
 Reverse-engineered from logic-analyser captures taken at the 4-pin Micro-Fit
-junction in the CONDUCTOR cable on 18 Sep 2026, using an fx2lafw analyser and
-PulseView/sigrok.
+junction in the CONDUCTOR cable on 18 Sep 2026 using an fx2lafw analyser and
+PulseView/sigrok, then verified by replay from an ESP32 on 19 Sep 2026.
 
 This is unofficial, independently derived documentation. It is not endorsed by
 Audiotec Fischer, and following it may void your warranty. Levels are written
-absolutely, with no verified upper bound — start low and be careful with your
+absolutely, with end stops still uncaptured — start low and be careful with your
 speakers and your ears.
 
 MIT licensed. See [LICENSE](LICENSE).

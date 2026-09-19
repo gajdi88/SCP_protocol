@@ -2,7 +2,7 @@
 
 Reverse-engineered from logic-analyser captures at the 4-pin Micro-Fit junction in the CONDUCTOR cable, 18 Sep 2026.
 
-**Status:** physical layer, framing, checksum, volume, sub-level and **input-select** commands are **confirmed**. Boot-time register meanings are **partly guessed**.
+**Status:** physical layer, framing, checksum, volume, sub-level and input-select commands are **confirmed, and proven by replay from an ESP32 with the knob unplugged** (19 Sep 2026). Boot-time register meanings are **partly guessed**.
 
 Confidence markers used below: **[C]** confirmed from captures, **[G]** guess consistent with the data, **[?]** unknown.
 
@@ -17,6 +17,8 @@ Confidence markers used below: **[C]** confirmed from captures, **[G]** guess co
 - **Input selection is a write to register 07** with a one-byte input index. It is only sent on a press-and-hold confirm. [C]
 - **Menu position (master / sub / input menu) is internal knob state.** Short presses and menu changes put nothing on the bus. [C]
 - **The amp is the source of truth for levels.** The knob reads them once at power-up. [C]
+- **Reads work at any time. Writes are rejected until register 01 is enabled**, and the amp forgets the enable every time it power-cycles. [C]
+- **An ESP32 can fully replace the knob.** Read, enable, master, sub and input select all replayed successfully. [C]
 - All **86 frames** across 11 captures pass every framing rule below (stop bits, length complement, length, checksum). [C]
 
 ---
@@ -62,7 +64,7 @@ SOF  LEN  ~LEN  01  CMD  REG  data…  CS
 **Timing:**
 
 - Amp reply starts 54–467 µs after the end of the request (median 215 µs). [C]
-- Every runtime write from the knob contains one **~0.6 ms pause** (0.58–0.62 ms). On register 04 writes it falls after byte 2 (`42 06`); on register 07 writes it falls after byte 3 (`42 06 F9`). Boot-time frames, including the boot-time write, have no pause and the amp accepts them. **The pause is therefore almost certainly a knob firmware artefact, not a protocol requirement.** [G] Still worth one replay test.
+- Every runtime write from the knob contains one **~0.6 ms pause** (0.58–0.62 ms). On register 04 writes it falls after byte 2 (`42 06`); on register 07 writes it falls after byte 3 (`42 06 F9`). Boot-time frames, including the boot-time write, have no pause and the amp accepts them. **The pause is a knob firmware artefact, not a protocol requirement:** the ESP32 sends every frame with no pause and the amp accepts them all. [C]
 
 ---
 
@@ -110,6 +112,24 @@ amp:   43 05 FA  01 2B 07  01 01 01  35
 
 ---
 
+## 4b. Write enable and the rejection frame
+
+Found by replay from the ESP32.
+
+| Situation | Exchange |
+|---|---|
+| Write attempted before enable | request `42 06 F9 01 2B 04 00 1B 01 4B` → reply `43 .. .. 01 2B 01 00 2C` |
+| Enable | request `42 05 FA 01 2B 01 01 01 2E` → reply body `01 2B 01 01 01 2E` |
+| Same write after enable | reply body `01 2B 04 00 1B 01 4B` (full echo) |
+
+- **Register 01 is a write-enable.** `01 01` turns it on. [C]
+- **Rejection frame:** any write while disabled is answered with `01 2B 01 00 2C`, i.e. "register 01 is 00". It names the cause instead of echoing the write. [C]
+- **Reads are never gated.** Register 04 read back correctly before any enable. [C]
+- **The enable does not survive an amp power-cycle.** After amp off/on with the ESP32 left running, the next write was rejected again. [C] A controller must send the enable after every amp start, or on seeing the rejection frame.
+- None of the boot-time reads (registers 00, 03, 05, 06, 07, 09) are needed for control. [C]
+
+---
+
 ## 5. Power-up handshake
 
 Timeline from the power-up capture:
@@ -127,7 +147,7 @@ Timeline from the power-up capture:
 | 5 | read `06` | `00 01 00 00 00 00 00 00 00 00 00` | ? |
 | 6 | read `07` | `00 03 01 00` | **Input register.** Likely current input `00` and input count `03`, matching the three selectable colours [G] |
 | 7 | read `09` | `00 00 00 96 01 00 13 88` | ? |
-| 8 | write `01` = `01 01` | echoed | "Remote present" / enable [G] |
+| 8 | write `01` = `01 01` | echoed | **Write enable** [C], see §4b |
 
 Evidence for row 3: the first volume click after boot sent master `13` (= `12` + 1), and `17` is the last sub level set in the earlier sub-up capture.
 
@@ -153,6 +173,8 @@ The earlier "input selection does nothing" puzzle was an operating error, not a 
 
 ## 7. Implications for the ESP32 gateway
 
+- **Proven on the bench:** ESP-WROOM-32, UART2 (RX2 = GPIO16, TX2 = GPIO17), 1 kΩ in series with each data line, SCP 3.3 V rail left unconnected, knob unplugged.
+- **Controller rule:** on a rejection frame, send the enable and retry the write once. That also covers the amp restarting with the ignition.
 - **Encoder injection is no longer necessary.** The ESP32 can speak the protocol directly.
 - **No mode switching or button emulation needed.** Master and sub are addressed independently via the target byte, and the input is set with a single register 07 write.
 - **Levels can be read back at any time** with a read of register 04, so the ESP32 never has to guess state.
@@ -167,10 +189,10 @@ The earlier "input selection does nothing" puzzle was an operating error, not a 
 
 | Question | How to answer |
 |---|---|
-| Does the amp accept level writes with no handshake, or is `2B 01` needed first? | Replay from ESP32 with knob unplugged |
-| Is the ~0.6 ms intra-frame pause required? (probably not, see §3) | Replay with and without it |
 | Min / max of master and sub ranges; does the knob stop sending at the limit? | Capture turning to both end stops |
-| Does read `07` really return current input and input count? | Capture a power-up with optical selected; first data byte should become `01` |
+| Does read `07` really return current input and input count? | Now trivial: select optical, then read register 07 from the ESP32; first data byte should become `01` |
+| Does an echoed input write actually switch the amp? | Confirm in PC-Tool with the Digital source set to remote-controlled. Echo alone only proves acceptance |
+| What do registers 00, 03, 05, 06, 09 hold, and do they change with configuration? | Read them from the ESP32 before and after PC-Tool changes |
 | Meaning of `01 01` after the input byte | Experiment |
 | Is there a separate digital-input volume target (`02`?) in register 04 | Enable "Digital volume" as a CONDUCTOR volume menu in PC-Tool and capture |
 | Does the amp ever speak unprompted (mute, preset change from PC-Tool, error)? | Long capture while changing things in PC-Tool |
@@ -190,6 +212,20 @@ The earlier "input selection does nothing" puzzle was an operating error, not a 
   ```
   sigrok-cli -d fx2lafw --config samplerate=2m --channels D0,D2 --time 40s -o capture.sr
   ```
+
+### ESP32 replay session, 19 Sep 2026
+
+All with the knob unplugged. Every reply passed the checksum and length rules.
+
+| Step | Result |
+|---|---|
+| Read levels, no handshake | OK: master `1B`, sub `17` |
+| Write master `1B`, no handshake | **Rejected** with `2B 01 00` |
+| Enable, then same write | OK, full echo |
+| Master `1A`, read back | OK, read confirms `1A` |
+| Sub `16`, read back, restore `17` | OK, read confirms |
+| Input `01`, then `00` | Both echoed. Register 04 read unchanged, so it holds levels only |
+| Amp power-cycled, write master | **Rejected** again: enable is volatile |
 
 ### Captures analysed
 
@@ -234,6 +270,7 @@ Unverified observations [G]: several byte pairs read sensibly as little-endian 1
 | Set master to `vv` | `42 06 F9 01 2B 04 00 vv 01 cs`, `cs = 30 + vv` |
 | Set sub to `vv` | `42 06 F9 01 2B 04 01 vv 01 cs`, `cs = 31 + vv` |
 | Select input `ii` (`00` main, `01` optical, `02` extension) | `42 06 F9 01 2B 07 ii 01 01 cs`, `cs = 34 + ii` |
-| Boot "enable" write | `42 05 FA 01 2B 01 01 01 2E` |
+| Write enable (needed after every amp power-up) | `42 05 FA 01 2B 01 01 01 2E` |
+| Amp's "writes not enabled" reply body | `01 2B 01 00 2C` |
 
 All values hex, checksums mod 256.
