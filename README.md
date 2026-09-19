@@ -13,7 +13,7 @@ master volume, subwoofer level and input selection — and, as of 19 Sep 2026,
 | Path | What it is | State |
 |---|---|---|
 | [`conductor-scp-protocol.md`](conductor-scp-protocol.md) | The protocol specification: physical layer, framing, checksum, registers, write-enable, power-up handshake, open questions | Framing, checksum, level, input-select and write-enable **confirmed on hardware**; boot register meanings partly guessed |
-| [`scp_bench/scp_bench.ino`](scp_bench/scp_bench.ino) | Arduino sketch: ESP32 acts as the knob, driven from the USB serial console | **Working against a real amp.** Read, write-enable, master, sub and input all verified |
+| [`scp_bench/scp_bench.ino`](scp_bench/scp_bench.ino) | Arduino sketch: ESP32 acts as the knob, driven from an identical console over **USB serial and BLE** | **Working against a real amp.** Read, write-enable, master, sub and input all verified |
 | [`ble_echo/ble_echo.ino`](ble_echo/ble_echo.ino) | Stage 0 BLE bring-up test: Nordic UART Service echo, no SCP involvement | Written, logic unit-tested; **not yet flashed** |
 | `LICENSE` | MIT | — |
 
@@ -80,6 +80,11 @@ with the ESP32 core. Verified on an ESP-WROOM-32 using UART2.
 Open `scp_bench/scp_bench.ino`, select your board, upload, then open the serial
 monitor at **115200 baud**.
 
+> **Set Tools → Partition Scheme → "Huge APP (3MB No OTA)" first.** The sketch
+> carries the BLE stack (~1.3 MB) and the default scheme gives the app only
+> 1.2 MB. Arduino IDE 2.x stores this per sketch, so setting it for `ble_echo`
+> does not carry over.
+
 ### Wiring — knob UNPLUGGED
 
 Two push-pull UART transmitters on one wire will fight, so the knob must be
@@ -120,6 +125,11 @@ battery, or use a USB isolator.
 
 ### Console commands
 
+The same console is live on **USB serial and BLE at once**, so you can drive the
+amp from the Mac while watching the frame trace on USB. Over BLE it advertises
+as `SCP-Bench` on the Nordic UART Service; `ble_echo/echo_test.py` works as a
+BLE terminal against it unchanged.
+
 `N` is **decimal**, or hex when written `0x..`. A value that doesn't parse
 completely is refused, not read as zero.
 
@@ -150,7 +160,7 @@ First bring-up is best done with speakers disconnected and no source playing.
 A good first write is a no-op: run `r`, then write back the exact value it
 reported.
 
-## Bluetooth (in progress)
+## Bluetooth
 
 The goal is to drive the bench over BLE instead of USB. `ble_echo/` is step one:
 a standalone sketch that exposes the **Nordic UART Service** and echoes lines
@@ -191,8 +201,9 @@ grant it in System Settings → Privacy & Security → Bluetooth. Note `SCP-Benc
 will *not* appear in System Settings → Bluetooth — that panel only lists Classic
 and paired devices, and nothing here needs pairing.
 
-The plan from here: graft the same service onto `scp_bench` so the existing text
-console (`r`, `m 30`, `+`) works unchanged over BLE.
+`scp_bench` now carries the same service, so the whole console works over BLE.
+`ble_echo/` is kept as an isolation tool: if BLE misbehaves later, it tells you
+whether the problem is BLE or the protocol code.
 
 ## Status and next steps
 

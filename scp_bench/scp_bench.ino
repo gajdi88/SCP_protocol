@@ -1,4 +1,4 @@
-// SCP bench controller v2: ESP32 takes the place of the CONDUCTOR knob.
+// SCP bench controller v3: ESP32 takes the place of the CONDUCTOR knob.
 // Protocol per conductor-scp-protocol.md (UART 230400 8N1, 3.3 V, idle high).
 //
 // Wiring (knob UNPLUGGED, ESP32 on the amp-side half of the Micro-Fit).
@@ -12,20 +12,30 @@
 //   +-------+-------+            GND  -> ESP32 GND
 //                                3V3  -> leave open
 //
-// USB console, 115200. Numbers are DECIMAL unless written 0x.. :
+// Console, identical over USB serial (115200) and Bluetooth LE. Both are live at
+// once, so you can drive it from the Mac while watching the frame trace on USB.
+// Numbers are DECIMAL unless written 0x.. :
 //   r        read levels          m N   master level       s N   sub level
 //   i N      input (0 main, 1 optical, 2 ext)              + / - master step
 //   e        send write-enable    ?     help
 //
-// v2 changes, all from bench results:
-//   - amp rejects writes with "2B 01 00" until register 01 is enabled, and forgets the
-//     enable when it power-cycles: writes now auto-enable and retry once.
-//   - out-of-range levels are REFUSED, not silently clamped. Master and sub have
-//     SEPARATE ceilings, each the highest value ever observed for that target.
-//   - numeric arguments must parse completely: a typo is refused, not read as 0.
-//   - accepts CR or LF line endings (no 1 s lag in `screen`), ignores line noise.
+// BLE: Nordic UART Service, advertised as "SCP-Bench". Drive it with
+// ble_echo/echo_test.py on the Mac, or any NUS terminal (nRF Connect, LightBlue).
+//
+// BEFORE UPLOADING: Tools -> Partition Scheme -> "Huge APP (3MB No OTA)".
+// The BLE stack is ~1.3 MB; the default scheme gives the app only 1.2 MB.
+//
+// v3: BLE console alongside USB. v2: write-enable handling, separate master/sub
+// ceilings, strict numeric parsing. See git history for the bench results behind each.
 
 #include <Arduino.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#if __has_include(<BLE2902.h>)
+  #include <BLE2902.h>              // arduino-esp32 2.x needs the CCCD added by hand
+  #define HAS_BLE2902 1             // 3.x adds it automatically and drops this header
+#endif
 
 static const int PIN_RX = 16, PIN_TX = 17;
 // Separate ceilings. Each is the highest value ever observed for that target, so the
@@ -36,6 +46,88 @@ static const uint8_t MAX_SUB    = 0x17;  // 23, from the sub level captures
 
 HardwareSerial &scp = Serial2;
 uint8_t master = 0, sub = 0;
+
+// ---- BLE transport -------------------------------------------------------
+// Nordic UART Service. Names are from the PERIPHERAL's point of view: this
+// device RECEIVES on RX and NOTIFIES on TX. Centrals have it the other way round.
+#define NUS_SERVICE "6E400001-B5A3-F393-E0A9-E50E24DCCA9E"
+#define NUS_RX      "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"   // central writes here
+#define NUS_TX      "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"   // we notify here
+
+static const char  *DEVICE_NAME = "SCP-Bench";
+static const size_t CHUNK    = 20;    // safe notify payload at the default 23-byte MTU
+static const size_t MAX_LINE = 32;    // console commands are short
+
+struct Line { char text[MAX_LINE]; };
+
+BLECharacteristic *txChar = nullptr;
+QueueHandle_t      lineQ  = nullptr;
+volatile bool      bleConnected  = false;
+volatile bool      needAdvertise = false;
+
+// Tees console output to USB serial and, when a central is attached, to a BLE
+// notify. Buffers a whole line and sends it as chunks: one notify per byte would
+// turn a frame trace into hundreds of packets at a ~7.5 ms connection interval.
+class Console : public Print {
+  char   buf[320];                    // long enough for a full register 03 dump line
+  size_t len = 0;
+public:
+  using Print::write;
+  size_t write(uint8_t b) override {
+    Serial.write(b);
+    if (len < sizeof buf - 1) buf[len++] = (char)b;
+    if (b == '\n' || len >= sizeof buf - 1) flushLine();
+    return 1;
+  }
+  void flushLine() {
+    if (len && bleConnected && txChar) {
+      for (size_t off = 0; off < len; off += CHUNK) {
+        size_t take = len - off < CHUNK ? len - off : CHUNK;
+        txChar->setValue((uint8_t *)(buf + off), take);
+        txChar->notify();
+        delay(4);                     // let the stack drain; back-to-back notifies drop
+      }
+    }
+    len = 0;
+  }
+};
+Console io;
+
+class ServerCB : public BLEServerCallbacks {
+  void onConnect(BLEServer *) override    { bleConnected = true;  Serial.print("BLE connected\r\n"); }
+  void onDisconnect(BLEServer *) override { bleConnected = false; needAdvertise = true;
+                                            Serial.print("BLE disconnected\r\n"); }
+};
+
+// A BLE callback must never do slow work: readReply() blocks for up to 50 ms, and
+// blocking in BLE context starves the stack and drops the link. So the callback only
+// assembles a line and queues it; loop() runs the command.
+class RxCB : public BLECharacteristicCallbacks {
+  char   buf[MAX_LINE];               // touched only in this task, so no locking
+  size_t len = 0;
+
+  void onWrite(BLECharacteristic *c) override {
+    uint8_t *data = c->getData();     // getData/getLength are stable across core
+    size_t n = c->getLength();        // versions; getValue()'s type is not
+    for (size_t i = 0; i < n; i++) {
+      char ch = (char)data[i];
+      if (ch == '\r' || ch == '\n')          push();
+      else if (ch >= 0x20 && ch < 0x7F)    { if (len < MAX_LINE - 1) buf[len++] = ch; }
+      else                                   len = 0;   // non-printable: drop the line
+    }
+    if (len) push();                  // a write with no newline is still a command
+  }
+
+  void push() {
+    if (!len) return;
+    buf[len] = '\0';
+    Line l;
+    strncpy(l.text, buf, MAX_LINE);
+    l.text[MAX_LINE - 1] = '\0';
+    xQueueSend(lineQ, &l, 0);         // never block inside a BLE callback
+    len = 0;
+  }
+};
 
 // ---- framing -------------------------------------------------------------
 // request: 42 LEN ~LEN 01 CMD REG data... CS     LEN = 3 + ndata, CS = CMD+REG+data
@@ -63,16 +155,20 @@ size_t readReply(uint8_t *body, size_t cap, uint32_t timeoutMs = 50) {
 }
 
 void dump(const char *tag, const uint8_t *b, size_t n) {
-  Serial.print(tag); for (size_t k = 0; k < n; k++) Serial.printf(" %02X", b[k]); Serial.print("\r\n");
+  io.print(tag); for (size_t k = 0; k < n; k++) io.printf(" %02X", b[k]); io.print("\r\n");
 }
 
 size_t transact(uint8_t cmd, uint8_t reg, const uint8_t *data, uint8_t n, uint8_t *body, size_t cap) {
   uint8_t req[32]; size_t len = buildRequest(req, cmd, reg, data, n);
   while (scp.available()) scp.read();          // flush stale bytes
   scp.write(req, len); scp.flush();
-  dump("TX", req, len);
   size_t r = readReply(body, cap);
-  if (r) dump("RX", body, r); else Serial.print("RX: no valid reply\r\n");
+  // Printing happens AFTER the exchange, not between request and reply. A BLE notify
+  // costs several ms; the amp answers in well under one. Printing first would leave
+  // the reply sitting in the UART FIFO while we block. Console output order is
+  // unchanged: still TX then RX.
+  dump("TX", req, len);
+  if (r) dump("RX", body, r); else io.print("RX: no valid reply\r\n");
   return r;
 }
 
@@ -92,7 +188,7 @@ bool writeReg(uint8_t reg, uint8_t a, uint8_t b, uint8_t c) {
     size_t r = transact(0x2B, reg, d, 3, body, sizeof body);
     if (r >= 7 && body[1] == 0x2B && body[2] == reg && body[3] == a && body[4] == b && body[5] == c) return true;
     if (attempt == 0 && isRejection(body, r)) {
-      Serial.print("amp says writes not enabled: enabling and retrying\r\n");
+      io.print("amp says writes not enabled: enabling and retrying\r\n");
       if (!enableWrites()) return false;
     } else return false;
   }
@@ -104,7 +200,7 @@ bool readLevels() {
   size_t r = transact(0x2A, 0x04, nullptr, 0, body, sizeof body);
   if (r < 6 || body[1] != 0x2A || body[2] != 0x04) return false;
   master = body[3]; sub = body[4];
-  Serial.printf("master=%u (0x%02X)  sub=%u (0x%02X)\r\n", master, master, sub, sub);
+  io.printf("master=%u (0x%02X)  sub=%u (0x%02X)\r\n", master, master, sub, sub);
   return true;
 }
 
@@ -112,7 +208,7 @@ bool setLevel(uint8_t target, long v) {           // target 0 = master, 1 = sub
   const char *name = target ? "sub" : "master";
   uint8_t limit = target ? MAX_SUB : MAX_MASTER;
   if (v < 0 || v > limit) {
-    Serial.printf("REFUSED: %s %ld is outside 0..%u\r\n", name, v, limit);
+    io.printf("REFUSED: %s %ld is outside 0..%u\r\n", name, v, limit);
     return false;
   }
   if (!writeReg(0x04, target, (uint8_t)v, 0x01)) return false;
@@ -120,7 +216,7 @@ bool setLevel(uint8_t target, long v) {           // target 0 = master, 1 = sub
 }
 
 bool setInput(long idx) {
-  if (idx < 0 || idx > 2) { Serial.print("REFUSED: input must be 0, 1 or 2\r\n"); return false; }
+  if (idx < 0 || idx > 2) { io.print("REFUSED: input must be 0, 1 or 2\r\n"); return false; }
   return writeReg(0x07, (uint8_t)idx, 0x01, 0x01);
 }
 
@@ -136,7 +232,7 @@ bool parseNum(const String &s, long &out) {
   out = v; return true;
 }
 
-void badNum() { Serial.print("REFUSED: need a number, e.g. 'm 30' or 'm 0x1E'\r\n"); }
+void badNum() { io.print("REFUSED: need a number, e.g. 'm 30' or 'm 0x1E'\r\n"); }
 
 void handle(String line) {
   line.trim(); if (!line.length()) return;
@@ -155,22 +251,58 @@ void handle(String line) {
       if (!readLevels()) break;                    // always step from the amp's truth
       ok = setLevel(0, (long)master + (c == '+' ? 1 : -1)); break;
     case '?':
-      Serial.printf("r | e | m N | s N | i N | + | -   (N decimal, or 0x.. hex)\r\n"
-                    "master 0..%u, sub 0..%u, input 0..2\r\n", MAX_MASTER, MAX_SUB);
+      io.printf("r | e | m N | s N | i N | + | -   (N decimal, or 0x.. hex)\r\n"
+                "master 0..%u, sub 0..%u, input 0..2\r\n", MAX_MASTER, MAX_SUB);
       return;
     default: return;                               // ignore line noise
   }
-  Serial.print(ok ? "OK\r\n" : "FAILED\r\n");
+  io.print(ok ? "OK\r\n" : "FAILED\r\n");
+}
+
+// ---- main ----------------------------------------------------------------
+void startBle() {
+  lineQ = xQueueCreate(8, sizeof(Line));
+
+  BLEDevice::init(DEVICE_NAME);
+  BLEServer *server = BLEDevice::createServer();
+  server->setCallbacks(new ServerCB());
+
+  BLEService *svc = server->createService(NUS_SERVICE);
+
+  txChar = svc->createCharacteristic(NUS_TX, BLECharacteristic::PROPERTY_NOTIFY);
+#ifdef HAS_BLE2902
+  txChar->addDescriptor(new BLE2902());
+#endif
+
+  BLECharacteristic *rxChar = svc->createCharacteristic(
+      NUS_RX, BLECharacteristic::PROPERTY_WRITE | BLECharacteristic::PROPERTY_WRITE_NR);
+  rxChar->setCallbacks(new RxCB());
+
+  svc->start();
+
+  BLEAdvertising *adv = BLEDevice::getAdvertising();
+  adv->addServiceUUID(NUS_SERVICE);
+  adv->setScanResponse(true);
+  BLEDevice::startAdvertising();
 }
 
 void setup() {
   Serial.begin(115200);
   scp.begin(230400, SERIAL_8N1, PIN_RX, PIN_TX);
   delay(500);
-  Serial.print("\r\nSCP bench v2 ready. '?' for help.\r\n");
+  startBle();
+  Serial.printf("\r\nSCP bench v3 ready, advertising as \"%s\". '?' for help.\r\n", DEVICE_NAME);
 }
 
 void loop() {
+  // 1. commands that arrived over BLE
+  Line l;
+  while (xQueueReceive(lineQ, &l, 0) == pdTRUE) {
+    Serial.printf("[ble] %s\r\n", l.text);         // trace on USB only, not echoed back
+    handle(String(l.text));
+  }
+
+  // 2. commands typed on USB serial
   static String buf;
   while (Serial.available()) {
     char ch = Serial.read();
@@ -178,4 +310,14 @@ void loop() {
     else if (ch >= 0x20 && ch < 0x7F) { if (buf.length() < 16) buf += ch; }
     else buf = "";                                 // non-printable: drop the line
   }
+
+  // 3. restart advertising after a disconnect
+  if (needAdvertise) {
+    needAdvertise = false;
+    delay(200);                                    // let the stack tear the link down
+    BLEDevice::startAdvertising();
+    Serial.print("re-advertising\r\n");
+  }
+
+  delay(5);                                        // yield to the BLE task
 }
