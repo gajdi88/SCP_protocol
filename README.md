@@ -84,12 +84,27 @@ monitor at **115200 baud**.
 Two push-pull UART transmitters on one wire will fight, so the knob must be
 disconnected before the ESP32 drives the knob→amp line.
 
+Breakout Micro-Fit connector, **viewed from the amp side, latching tab at the top**:
+
 ```
-SCP GND                    -> ESP32 GND
-amp TX  (analyser D0 line) -> 1k -> GPIO16 (RX2)
-amp RX  (analyser D2 line) <- 1k <- GPIO17 (TX2)
-SCP 3.3 V rail             -> leave open
+        latching tab
+   +---------+---------+
+   |   ARX   |   ATX   |
+   +---------+---------+
+   |   GND   |   3V3   |
+   +---------+---------+
 ```
+
+| Pin | Carries | Connect to |
+|---|---|---|
+| ARX (top left) | Amp RX: knob → amp (analyser D2) | GPIO17 (TX2) via 1 kΩ |
+| ATX (top right) | Amp TX: amp → knob (analyser D0) | GPIO16 (RX2) via 1 kΩ |
+| GND (bottom left) | Ground | ESP32 GND |
+| 3V3 (bottom right) | Amp 3.3 V rail | leave open |
+
+Labels are from the amp's point of view: the ESP32 **drives** ARX and
+**listens** to ATX. The layout mirrors left-right if you look at the mating half
+or the cable side instead, so check your orientation.
 
 The series resistors are what make a wiring mistake survivable: within the
 3.3 V domain, worst-case contention current is ~3.3 mA, safe on both ends.
@@ -138,13 +153,10 @@ reported.
 
 The protocol is proven end-to-end for level and input control. What remains:
 
-1. **Record which physical Micro-Fit pin is D0 and which is D2.** Still missing
-   from §2 of the spec, and it's the one fact that makes the wiring above
-   reproducible.
-2. Confirm in PC-Tool that an echoed input write actually **switches** the amp —
+1. Confirm in PC-Tool that an echoed input write actually **switches** the amp —
    the echo so far only proves the frame was accepted.
-3. Capture the real master and sub end stops, then raise the ceilings.
-4. Work the remaining [open questions](conductor-scp-protocol.md#8-open-questions-and-next-captures):
+2. Capture the real master and sub end stops, then raise the ceilings.
+3. Work the remaining [open questions](conductor-scp-protocol.md#8-open-questions-and-next-captures):
    the contents of registers 00, 03, 05, 06, 09, the meaning of the constant
    `01` bytes, and whether the amp ever speaks unprompted.
 

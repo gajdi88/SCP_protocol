@@ -1,11 +1,16 @@
 // SCP bench controller v2: ESP32 takes the place of the CONDUCTOR knob.
 // Protocol per conductor-scp-protocol.md (UART 230400 8N1, 3.3 V, idle high).
 //
-// Wiring (knob UNPLUGGED, ESP32 on the amp-side half of the Micro-Fit):
-//   SCP GND                      -> ESP32 GND
-//   AMP TX (old analyser D0)     -> 1k -> RX2 (GPIO16)
-//   AMP RX (old analyser D2)     <- 1k <- TX2 (GPIO17)
-//   SCP 3.3 V rail               -> leave open
+// Wiring (knob UNPLUGGED, ESP32 on the amp-side half of the Micro-Fit).
+// Breakout connector seen from the AMP SIDE, latching tab at the top:
+//
+//        latching tab            ARX = amp RX  (knob -> amp, old analyser D2)
+//   +-------+-------+            ATX = amp TX  (amp -> knob, old analyser D0)
+//   |  ARX  |  ATX  |
+//   +-------+-------+            ARX  <- 1k <- TX2 (GPIO17)
+//   |  GND  |  3V3  |            ATX  -> 1k -> RX2 (GPIO16)
+//   +-------+-------+            GND  -> ESP32 GND
+//                                3V3  -> leave open
 //
 // USB console, 115200. Numbers are DECIMAL unless written 0x.. :
 //   r        read levels          m N   master level       s N   sub level

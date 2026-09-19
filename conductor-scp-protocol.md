@@ -35,7 +35,34 @@ Confidence markers used below: **[C]** confirmed from captures, **[G]** guess co
 | Bit time | 4.340 µs measured → 230 407 baud (nominal 230400) | C |
 | Framing errors seen | none | C |
 
-Which physical Micro-Fit pin is D0 and which is D2 has not been recorded here. Note it on the tap board.
+### Micro-Fit pinout [C]
+
+Breakout Micro-Fit connector, **viewed from the amp side, latching tab at the top**:
+
+```
+              latching tab
+         +---------+---------+
+         |   ARX   |   ATX   |    top row
+         +---------+---------+
+         |   GND   |   3V3   |    bottom row
+         +---------+---------+
+           viewed from the amp side
+```
+
+| Position | Label | Carries | Analyser channel | ESP32 connection |
+|---|---|---|---|---|
+| Top left | ARX | Amp RX: knob → amp | D2 | GPIO17 (TX2) via 1 kΩ |
+| Top right | ATX | Amp TX: amp → knob | D0 | GPIO16 (RX2) via 1 kΩ |
+| Bottom left | GND | Ground | — | GND |
+| Bottom right | 3V3 | Amp 3.3 V rail | — | leave open |
+
+Names are from the **amp's** point of view: ARX is an input to the amp, so the
+ESP32 drives it; ATX is an output from the amp, so the ESP32 listens to it.
+
+**Orientation matters.** The layout above is left-right mirrored if you look at
+the mating half or at the cable side instead. Confirm with a DMM before
+connecting: 3V3 should read 3.3 V against GND with the amp powered, and no pin
+should read 12 V.
 
 ---
 
