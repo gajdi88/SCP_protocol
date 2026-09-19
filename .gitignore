@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+._*
+
+# Arduino IDE build output
+build/
+*.elf
+*.bin
+*.hex
+*.map
+
+# PlatformIO
+.pio/
+.vscode/
+
+# Editors
+*.swp
+*~
