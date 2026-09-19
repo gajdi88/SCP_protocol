@@ -31,6 +31,8 @@
 // BEFORE UPLOADING: Tools -> Partition Scheme -> "Huge APP (3MB No OTA)".
 // The BLE stack is ~1.3 MB; the default scheme gives the app only 1.2 MB.
 //
+// v6: advertise the name in the primary packet and the 128-bit service UUID in the
+// scan response, so neither packet can overflow the 31-byte advertising limit.
 // v5: 'v' verbosity toggle. Each command otherwise answers with TX/RX/OK, which is
 // ~4 BLE notifications; a slider dragging at 10 Hz would flood the link and the
 // 8-deep command queue. An app sends 'v 0' on connect and gets one line per command.
@@ -351,8 +353,22 @@ void startBle() {
 
   svc->start();
 
+  // A BLE advertisement carries at most 31 bytes. Flags (3) + the 128-bit NUS
+  // UUID (18) + the name (10) is exactly 31 with nothing to spare, and the
+  // library may also add TX power, which overflows it. Rather than depend on how
+  // the library happens to split that, set both packets explicitly: the NAME goes
+  // in the primary advertisement, where even a passive scan sees it, and the
+  // 128-bit UUID goes in the scan response. 13 and 18 bytes, both comfortable.
+  BLEAdvertisementData advData;
+  advData.setFlags(0x06);                        // LE General Discoverable, no BR/EDR
+  advData.setName(deviceName);
+
+  BLEAdvertisementData scanData;
+  scanData.setCompleteServices(BLEUUID(NUS_SERVICE));
+
   BLEAdvertising *adv = BLEDevice::getAdvertising();
-  adv->addServiceUUID(NUS_SERVICE);
+  adv->setAdvertisementData(advData);
+  adv->setScanResponseData(scanData);
   adv->setScanResponse(true);
   beginAdvertising();
 }
@@ -362,7 +378,7 @@ void setup() {
   scp.begin(230400, SERIAL_8N1, PIN_RX, PIN_TX);
   delay(500);
   startBle();
-  Serial.printf("\r\nSCP bench v5 ready, advertising as \"%s\". '?' for help.\r\n", deviceName);
+  Serial.printf("\r\nSCP bench v6 ready, advertising as \"%s\". '?' for help.\r\n", deviceName);
 }
 
 void loop() {

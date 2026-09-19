@@ -43,6 +43,19 @@ Slider drags are coalesced to one write per 120 ms, with the final value always
 sent on release. Without that, a drag would outrun both the BLE link and the
 ESP32's 8-deep command queue, and the volume would lag behind your thumb.
 
+## Reliability
+
+**Connecting retries.** Android's BLE stack fails a first connect attempt often
+enough that one try is not a fair test — the familiar "status 133". The app
+retries up to four times with a growing pause, which needs no new tap because
+only the device chooser requires a user gesture. An unexpected drop triggers up
+to three reconnect attempts; tapping Disconnect yourself does not.
+
+**Reading levels retries.** A single `r` can go unanswered if the amp is settling
+or the command is lost on a link that has just come up. The app asks up to four
+times, stops the instant an answer arrives, and only then reports the amp as
+silent. The ⟳ button re-reads on demand.
+
 ## Known limitation
 
 The amp does not report the selected input through any register this firmware

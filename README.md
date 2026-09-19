@@ -213,6 +213,15 @@ and paired devices, and nothing here needs pairing.
 `ble_echo/` is kept as an isolation tool: if BLE misbehaves later, it tells you
 whether the problem is BLE or the protocol code.
 
+### Advertising layout
+
+A BLE advertisement carries at most 31 bytes. Flags (3) plus the 128-bit Nordic
+UART UUID (18) plus the name (10) is exactly 31 with nothing spare, and a TX
+power field would overflow it. Rather than depend on how the library splits
+that, both packets are set explicitly: the **name** goes in the primary
+advertisement, where even a passive scan sees it, and the **128-bit service
+UUID** goes in the scan response — 13 and 18 bytes.
+
 ### Staying reachable
 
 The firmware's job is to never become invisible. Advertising stops whenever a

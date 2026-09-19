@@ -28,6 +28,10 @@
     background:var(--panel); color:var(--text); cursor:pointer;
   }
   #conn.on { border-color:var(--main); color:var(--main); }
+  #refresh {
+    font:600 17px/1 inherit; width:40px; padding:0; border-radius:99px;
+    border:1px solid var(--line); background:var(--panel); color:var(--dim); cursor:pointer;
+  }
   .card { background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:18px; margin-bottom:14px; }
   .row { display:flex; align-items:baseline; justify-content:space-between; margin-bottom:14px; }
   .label { font-size:13px; color:var(--dim); text-transform:uppercase; letter-spacing:.08em; }
@@ -69,7 +73,10 @@
 
 <header>
   <h1>MATCH UP 8DSP <span id="dev"></span></h1>
-  <button id="conn">Connect</button>
+  <div style="display:flex;gap:8px">
+    <button id="refresh" title="Re-read levels from the amp" hidden>&#8635;</button>
+    <button id="conn">Connect</button>
+  </div>
 </header>
 
 <div class="card">
@@ -106,11 +113,13 @@ const TX  = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 const $ = id => document.getElementById(id);
 const els = {
   conn:$('conn'), dev:$('dev'), status:$('status'),
-  m:$('mslider'), s:$('sslider'), mval:$('mval'), sval:$('sval'),
+  m:$('mslider'), s:$('sslider'), mval:$('mval'), sval:$('sval'), refresh:$('refresh'),
   buttons:[...document.querySelectorAll('.inputs button')],
 };
 
 let device = null, rxChar = null, connected = false;
+let wantConnected = false;                  // true = a drop should trigger a reconnect
+const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function setStatus(msg, isErr) {
   els.status.textContent = msg;
@@ -123,6 +132,7 @@ function setConnected(on) {
   els.conn.textContent = on ? 'Disconnect' : 'Connect';
   els.conn.classList.toggle('on', on);
   [els.m, els.s, ...els.buttons].forEach(e => e.disabled = !on);
+  els.refresh.hidden = !on;
   if (!on) { els.dev.textContent = ''; els.buttons.forEach(b => b.classList.remove('sel')); }
 }
 
@@ -157,6 +167,32 @@ function onNotify(e) {
   if (lineBuf.length > 512) lineBuf = '';        // never grow without bound
 }
 
+// The amp is the source of truth, but a single 'r' can go unanswered: the amp may
+// be settling, or the command may be lost across a link that has just come up. So
+// ask repeatedly until it answers rather than showing '--' forever.
+let levelsKnown = false, readTries = 0, readTimer = null;
+
+function stopReading() { clearTimeout(readTimer); readTimer = null; }
+
+function requestLevels() {
+  stopReading();
+  levelsKnown = false;
+  readTries = 0;
+  pollLevels();
+}
+
+function pollLevels() {
+  if (levelsKnown || !rxChar) return;
+  if (readTries >= 4) {
+    setStatus('No answer from the amp \u2014 is it powered?', true);
+    return;
+  }
+  readTries++;
+  if (readTries > 1) setStatus('Reading levels\u2026 (retry ' + readTries + ')');
+  send('r');
+  readTimer = setTimeout(pollLevels, 1200);
+}
+
 function onLine(line) {
   // "master 0..41, sub 0..23, input 0..2" - take the ceilings from the firmware
   // rather than hardcoding them, so the app cannot drift out of step with it.
@@ -166,13 +202,16 @@ function onLine(line) {
   // "master=30 (0x1E)  sub=23 (0x17)"
   m = line.match(/master=(\d+).*sub=(\d+)/);
   if (m) {
+    levelsKnown = true;
+    stopReading();
     if (!dragging.m) { els.m.value = m[1]; paint('m', +m[1]); }
     if (!dragging.s) { els.s.value = m[2]; paint('s', +m[2]); }
     setStatus('Connected');
     return;
   }
-  if (/no valid reply/i.test(line)) setStatus('No answer from the amp — is it powered?', true);
-  else if (/^REFUSED/i.test(line))  setStatus(line, true);
+  // Do not report a silent amp here: pollLevels() is still retrying and will say
+  // so itself once it has genuinely given up.
+  if (/^REFUSED/i.test(line)) setStatus(line, true);
 }
 
 // ---- control ------------------------------------------------------------
@@ -222,8 +261,54 @@ els.buttons.forEach(b => b.addEventListener('click', () => {
 // ---- connection ---------------------------------------------------------
 function onDisconnected() {
   rxChar = null;
+  stopReading();
   setConnected(false);
-  setStatus('Disconnected');
+  if (wantConnected) { setStatus('Link lost, reconnecting\u2026'); reconnect(); }
+  else setStatus('Disconnected');
+}
+
+// Android's BLE stack fails a first connect attempt often enough that one try is
+// not a fair test - the familiar "status 133". Retrying after a short pause
+// usually succeeds, and needs no new user gesture because the device has already
+// been chosen; only requestDevice() requires one.
+async function connectGatt(dev, attempts = 4) {
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      setStatus(i === 1 ? 'Connecting\u2026' : 'Connecting\u2026 (attempt ' + i + ')');
+      return await dev.gatt.connect();
+    } catch (e) {
+      if (dev.gatt.connected) dev.gatt.disconnect();   // never leak a half-open link
+      if (i === attempts) throw e;
+      await sleep(400 * i);                            // give the stack time to settle
+    }
+  }
+}
+
+// Bring up the GATT side of an established connection and read the amp's state.
+async function openSession(server) {
+  const svc = await server.getPrimaryService(NUS);
+  rxChar = await svc.getCharacteristic(RX);
+  const txChar = await svc.getCharacteristic(TX);
+  await txChar.startNotifications();
+  txChar.addEventListener('characteristicvaluechanged', onNotify);
+
+  els.dev.textContent = device.name || '';
+  setConnected(true);
+
+  await send('v 0');   // quiet mode: one line per command instead of four
+  await send('?');     // learn this firmware's ceilings
+  requestLevels();     // and initialise the sliders from the amp itself
+}
+
+async function reconnect() {
+  for (let i = 0; i < 3 && wantConnected; i++) {
+    try {
+      await sleep(600);
+      await openSession(await connectGatt(device, 2));
+      return;
+    } catch (e) { /* try again */ }
+  }
+  if (wantConnected) setStatus('Could not reconnect. Tap Connect.', true);
 }
 
 async function connect() {
@@ -239,32 +324,25 @@ async function connect() {
     });
     device.addEventListener('gattserverdisconnected', onDisconnected);
 
-    setStatus('Connecting…');
-    const server = await device.gatt.connect();
-    const svc = await server.getPrimaryService(NUS);
-    rxChar = await svc.getCharacteristic(RX);
-    const txChar = await svc.getCharacteristic(TX);
-    await txChar.startNotifications();
-    txChar.addEventListener('characteristicvaluechanged', onNotify);
-
-    els.dev.textContent = device.name || '';
-    setConnected(true);
-    setStatus('Reading levels…');
-
-    await send('v 0');   // quiet mode: one line per command instead of four
-    await send('?');     // learn this firmware's ceilings
-    await send('r');     // the amp is the source of truth for the sliders
+    wantConnected = true;
+    await openSession(await connectGatt(device));
   } catch (e) {
     rxChar = null;
+    wantConnected = false;
     setConnected(false);
     setStatus(e.name === 'NotFoundError' ? 'No amp chosen' : e.message, e.name !== 'NotFoundError');
   }
 }
 
 els.conn.addEventListener('click', () => {
-  if (connected) { device && device.gatt.connected && device.gatt.disconnect(); onDisconnected(); }
-  else connect();
+  if (connected || wantConnected) {
+    wantConnected = false;                   // a deliberate disconnect must not reconnect
+    if (device && device.gatt.connected) device.gatt.disconnect();
+    onDisconnected();
+  } else connect();
 });
+
+els.refresh.addEventListener('click', requestLevels);
 
 setConnected(false);
 </script>
