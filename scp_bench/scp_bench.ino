@@ -396,10 +396,20 @@ void startBle() {
 
 void setup() {
   Serial.begin(115200);
+
+  // On a native-USB part (H2, C3, C6, S3) the host takes a moment to enumerate
+  // and a terminal longer still to attach, so a fixed short delay emits the
+  // banner into a port nobody is listening to yet and the console looks dead.
+  // Wait for the host to open the port, but bounded, so a board running headless
+  // still boots. On a UART part this returns true at once and costs nothing.
+  uint32_t t0 = millis();
+  while (!Serial && millis() - t0 < 3000) delay(10);
+  delay(200);
+
   scp.begin(230400, SERIAL_8N1, PIN_RX, PIN_TX);
-  delay(500);
   startBle();
   Serial.printf("\r\nSCP bench v7 ready, advertising as \"%s\". '?' for help.\r\n", deviceName);
+  Serial.print("If you missed this banner, just type '?' - the console is live either way.\r\n");
 }
 
 void loop() {
