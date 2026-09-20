@@ -7,10 +7,11 @@
 //        latching tab            ARX = amp RX  (knob -> amp, old analyser D2)
 //   +-------+-------+            ATX = amp TX  (amp -> knob, old analyser D0)
 //   |  ARX  |  ATX  |
-//   +-------+-------+            ARX  <- 1k <- TX2 (GPIO17)
-//   |  GND  |  3V3  |            ATX  -> 1k -> RX2 (GPIO16)
+//   +-------+-------+            ARX  <- 1k <- PIN_TX
+//   |  GND  |  3V3  |            ATX  -> 1k -> PIN_RX
 //   +-------+-------+            GND  -> ESP32 GND
 //                                3V3  -> leave open
+//   (WROOM-32: PIN_RX = 16, PIN_TX = 17.  ESP32-H2: see the pin block below.)
 //
 // Console, identical over USB serial (115200) and Bluetooth LE. Both are live at
 // once, so you can drive it from the Mac while watching the frame trace on USB.
@@ -25,12 +26,15 @@
 // any phone may take the link once the previous one drops. Open, no pairing.
 // Drive it with ble_echo/echo_test.py, or any NUS terminal (nRF Connect on Android).
 //
-// PIN_RX/PIN_TX below are for a WROOM-32. On an S3/C3/C6 pick free pins; the UART
-// matrix will route Serial2 anywhere, and the BLE code here is variant-independent.
+// Board support: see the UART/pin block below. The BLE code is variant-independent.
+// On a USB-native part (H2, C3, C6, S3) set Tools -> "USB CDC On Boot: Enabled",
+// or the console goes to the UART0 pins instead of the USB cable and the Serial
+// Monitor stays empty.
 //
 // BEFORE UPLOADING: Tools -> Partition Scheme -> "Huge APP (3MB No OTA)".
 // The BLE stack is ~1.3 MB; the default scheme gives the app only 1.2 MB.
 //
+// v7: builds for ESP32-H2 and other two-UART parts, which have no Serial2.
 // v6: advertise the name in the primary packet and the 128-bit service UUID in the
 // scan response, so neither packet can overflow the 31-byte advertising limit.
 // v5: 'v' verbosity toggle. Each command otherwise answers with TX/RX/OK, which is
@@ -51,14 +55,31 @@
   #define HAS_BLE2902 1             // 3.x adds it automatically and drops this header
 #endif
 
-static const int PIN_RX = 16, PIN_TX = 17;
+// ---- board differences ----------------------------------------------------
+// Only the original ESP32 and the S3 have three UARTs, so only they have Serial2.
+// The H2, C3, C6 and S2 have two, where the spare one is Serial1. Referring to
+// Serial2 on those parts is a compile error, not a run-time surprise.
+#if defined(CONFIG_IDF_TARGET_ESP32) || defined(CONFIG_IDF_TARGET_ESP32S3)
+  #define SCP_SERIAL Serial2
+#else
+  #define SCP_SERIAL Serial1
+#endif
+
+#if defined(CONFIG_IDF_TARGET_ESP32H2)
+  // ESP32-H2-Zero. CHECK THESE AGAINST YOUR BOARD'S PINOUT before wiring: avoid
+  // the strapping pins (GPIO8, GPIO9) and anything taken by flash or USB.
+  static const int PIN_RX = 4, PIN_TX = 5;
+#else
+  // WROOM-32, the UART2 defaults. Not usable on a WROVER, where GPIO16/17 are PSRAM.
+  static const int PIN_RX = 16, PIN_TX = 17;
+#endif
 // Separate ceilings. Each is the highest value ever observed for that target, so the
 // sub cannot be driven to a master-sized number. Raise only after capturing the real
 // end stops (spec section 8).
 static const uint8_t MAX_MASTER = 0x29;  // 41, from the master volume captures
 static const uint8_t MAX_SUB    = 0x17;  // 23, from the sub level captures
 
-HardwareSerial &scp = Serial2;
+HardwareSerial &scp = SCP_SERIAL;
 uint8_t master = 0, sub = 0;
 bool verbose = true;                 // frame tracing; 'v 0' quiets it for app use
 
@@ -378,7 +399,7 @@ void setup() {
   scp.begin(230400, SERIAL_8N1, PIN_RX, PIN_TX);
   delay(500);
   startBle();
-  Serial.printf("\r\nSCP bench v6 ready, advertising as \"%s\". '?' for help.\r\n", deviceName);
+  Serial.printf("\r\nSCP bench v7 ready, advertising as \"%s\". '?' for help.\r\n", deviceName);
 }
 
 void loop() {

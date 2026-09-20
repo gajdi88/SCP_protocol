@@ -75,8 +75,23 @@ register 03 configuration dump, and what is still unknown.
 **Prerequisites:** ESP32 board with a spare UART, Arduino IDE or arduino-cli
 with the ESP32 core. Verified on an ESP-WROOM-32 using UART2.
 
-> On an **ESP32-WROVER**, GPIO16/17 are wired to the PSRAM die — move `PIN_RX` /
-> `PIN_TX` to free pins. The ESP32 UART matrix will route Serial2 anywhere.
+### Board support
+
+| Part | SCP UART | Default pins | Notes |
+|---|---|---|---|
+| ESP32 WROOM-32 | `Serial2` | GPIO16 / GPIO17 | The original bench board |
+| ESP32-WROVER | `Serial2` | **change them** | GPIO16/17 are wired to the PSRAM die |
+| ESP32-H2 | `Serial1` | GPIO4 / GPIO5 | Verify against your board's pinout |
+| C3 / C6 / S2 | `Serial1` | set your own | Two UARTs, so no `Serial2` |
+| ESP32-S3 | `Serial2` | set your own | Three UARTs |
+
+Only the original ESP32 and the S3 have three UARTs, so only they have a
+`Serial2`; naming it on a two-UART part is a compile error. The sketch picks the
+right one from the build target.
+
+On a USB-native part (H2, C3, C6, S3) set **Tools → USB CDC On Boot: Enabled**,
+or the console goes to the UART0 pins rather than the USB cable and the Serial
+Monitor stays empty.
 
 Open `scp_bench/scp_bench.ino`, select your board, upload, then open the serial
 monitor at **115200 baud**.
