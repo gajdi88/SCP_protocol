@@ -112,7 +112,12 @@ amp:   43 05 FA  01 2B 04  00 28 01  58
 | Trailing `01` | Constant in all 32 writes | ? |
 
 - Checksum shortcut: `CS = 0x30 + target + level` (mod 256).
-- Observed master values: `0x12`–`0x29`. Observed sub values: `0x06`–`0x17`. **End stops not yet captured.**
+- **Master maximum is `0x3C` (60).** [C] Found by turning the knob to its end stop, then
+  reading register 04 from the ESP32 (27 Sep 2026). This is the highest value the knob
+  will command; whether the amp would accept more is untested. [?]
+- Observed master values otherwise `0x12`–`0x29`; **minimum not captured.** [?]
+- Observed sub values `0x06`–`0x17`. **Neither sub end stop captured**, so `0x17` is the
+  highest seen rather than a known limit. [?]
 - Up and down are indistinguishable except by the value. [C]
 
 ---
@@ -216,7 +221,8 @@ The earlier "input selection does nothing" puzzle was an operating error, not a 
 
 | Question | How to answer |
 |---|---|
-| Min / max of master and sub ranges; does the knob stop sending at the limit? | Capture turning to both end stops |
+| Master minimum, and both sub end stops | Same method as the master maximum: turn the knob to the stop, then read register 04 from the ESP32 |
+| Does the amp accept a master value above `0x3C`, or clamp it? | Write `3D`+ and read register 04 back |
 | Does read `07` really return current input and input count? | Now trivial: select optical, then read register 07 from the ESP32; first data byte should become `01` |
 | Does an echoed input write actually switch the amp? | Confirm in PC-Tool with the Digital source set to remote-controlled. Echo alone only proves acceptance |
 | What do registers 00, 03, 05, 06, 09 hold, and do they change with configuration? | Read them from the ESP32 before and after PC-Tool changes |
@@ -253,6 +259,18 @@ All with the knob unplugged. Every reply passed the checksum and length rules.
 | Sub `16`, read back, restore `17` | OK, read confirms |
 | Input `01`, then `00` | Both echoed. Register 04 read unchanged, so it holds levels only |
 | Amp power-cycled, write master | **Rejected** again: enable is volatile |
+
+### Master end stop, 27 Sep 2026
+
+Knob reconnected, turned to maximum, then the knob removed and the ESP32 reconnected:
+
+```
+TX 42 03 FC 01 2A 04 2E
+RX 01 2A 04 3C 17 00 00 81      -> master 3C, sub 17
+```
+
+**Master maximum = `0x3C` (60).** The level survives the knob being unplugged, which
+is consistent with the amp, not the knob, holding the levels (§1).
 
 ### Captures analysed
 

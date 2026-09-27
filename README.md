@@ -176,8 +176,10 @@ Every transaction prints the transmitted frame (`TX`) and the decoded reply body
 
 ### Level ceilings
 
-Master and sub have **separate** limits, each set to the highest value ever
-observed for that target — `MAX_MASTER = 0x29` (41) and `MAX_SUB = 0x17` (23).
+Master and sub have **separate** limits. `MAX_MASTER = 0x3C` (60) is the real end
+stop, found by turning the knob to maximum and reading register 04 back.
+`MAX_SUB = 0x17` (23) is still only the highest value ever *observed*, not a
+measured limit, so it stays conservative until captured the same way.
 Out-of-range values are **refused, not clamped**, so you never get an `OK` for a
 command you didn't issue. Raise them only after capturing the real end stops.
 

@@ -73,11 +73,12 @@
   // WROOM-32, the UART2 defaults. Not usable on a WROVER, where GPIO16/17 are PSRAM.
   static const int PIN_RX = 16, PIN_TX = 17;
 #endif
-// Separate ceilings. Each is the highest value ever observed for that target, so the
-// sub cannot be driven to a master-sized number. Raise only after capturing the real
-// end stops (spec section 8).
-static const uint8_t MAX_MASTER = 0x29;  // 41, from the master volume captures
-static const uint8_t MAX_SUB    = 0x17;  // 23, from the sub level captures
+// Separate ceilings, so the sub cannot be driven to a master-sized number.
+// MAX_MASTER is the real end stop: the knob was turned to maximum and register 04
+// read back 0x3C (spec section 4). MAX_SUB is still only the highest value ever
+// observed, not a measured limit, so it stays conservative until captured the same way.
+static const uint8_t MAX_MASTER = 0x3C;  // 60, the knob's own maximum
+static const uint8_t MAX_SUB    = 0x17;  // 23, highest seen - not a known limit
 
 HardwareSerial &scp = SCP_SERIAL;
 uint8_t master = 0, sub = 0;
