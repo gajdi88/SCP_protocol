@@ -13,6 +13,8 @@ no APK, no toolchain.
 3. Chrome menu → **Add to Home screen**. It then launches full screen with its
    own icon.
 4. Tap **Connect**, pick your `SCP-xxxx` board from Chrome's device chooser.
+   This is a one-time pairing step: from then on the app connects by itself
+   every time it starts.
 
 HTTPS is not optional: Web Bluetooth only runs in a secure context, so opening
 the file over `file://` will not work. GitHub Pages serves HTTPS, which is why
@@ -23,8 +25,32 @@ it is the easy route.
 - **Chrome on Android.** Firefox Android has no Web Bluetooth, and Safari/iOS
   never will.
 - **Location services on** — Chrome needs it to scan for BLE devices.
-- Chrome shows its device chooser on every connect. There is no silent
-  auto-reconnect; that is a deliberate browser privacy behaviour, not a bug here.
+- Chrome shows its device chooser whenever **Connect** is tapped; a page cannot
+  scan and pick a device on its own. Only the first connection needs it, though
+  (see Auto-connect below).
+
+## Auto-connect
+
+Once the amp has been chosen in the chooser, Chrome remembers the permission.
+On every later launch the app asks Chrome for the remembered amp
+(`navigator.bluetooth.getDevices()`), waits up to 15 s for it to advertise
+(`watchAdvertisements()`, where available), and connects without a tap. The amp
+picked most recently is preferred, in case an old board is still remembered.
+
+It also reconnects when the app comes back to the foreground, because Android
+often drops the link while the screen is locked. Tapping **Disconnect** holds
+that off until you tap **Connect** or relaunch the app.
+
+If this Chrome lacks `getDevices()`, the app behaves as before (tap Connect
+each time), and the version line at the bottom says
+"auto-connect unavailable in this browser".
+
+## Version
+
+The line at the bottom of the screen shows `APP_VERSION` from `index.html`.
+Bump it with every published change, so you can tell at a glance whether the
+phone has loaded the new build. GitHub Pages caches for about 10 minutes; if the
+old version persists, close the app fully and reopen it.
 
 ## How it talks to the amp
 
