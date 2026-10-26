@@ -45,6 +45,21 @@ If this Chrome lacks `getDevices()`, the app behaves as before (tap Connect
 each time), and the version line at the bottom says
 "auto-connect unavailable in this browser".
 
+## Offline use
+
+Open the app once with an internet connection and it saves itself on the phone
+(a service worker, `sw.js`). After that it opens with no connection at all, and
+Bluetooth needs none. The version line at the bottom adds
+"saved for offline" once the copy is stored.
+
+Whenever the phone does have a connection, the app loads the latest published
+version and refreshes the saved copy, so updates still arrive by themselves. If
+the network does not answer within 3 s, the saved copy is used instead.
+
+Android can discard saved site data when storage runs very low or when Chrome's
+site data is cleared. Installing via **Add to Home screen** makes that much
+less likely. If it ever happens, open the app once while online.
+
 ## Version
 
 The line at the bottom of the screen shows `APP_VERSION` from `index.html`.

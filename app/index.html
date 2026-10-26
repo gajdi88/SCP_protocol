@@ -107,7 +107,7 @@
 <script>
 'use strict';
 // Bump on every change that gets published, so the phone can be checked against it.
-const APP_VERSION = '1.1.0 (2026-10-25)';
+const APP_VERSION = '1.2.0 (2026-10-26)';
 
 // Nordic UART Service. Names are from the PERIPHERAL's point of view: the ESP32
 // receives on RX and notifies on TX, so we write to RX and subscribe to TX.
@@ -433,7 +433,19 @@ els.conn.addEventListener('click', () => {
 
 els.refresh.addEventListener('click', requestLevels);
 
-els.ver.textContent = 'v' + APP_VERSION + (canAuto ? '' : ' \u00b7 auto-connect unavailable in this browser');
+function showVersion(offline) {
+  els.ver.textContent = 'v' + APP_VERSION
+    + (offline ? ' \u00b7 saved for offline' : '')
+    + (canAuto ? '' : ' \u00b7 auto-connect unavailable in this browser');
+}
+showVersion(false);
+
+// Offline support, see sw.js. The version line confirms once this copy is saved.
+// Registration fails harmlessly where service workers are unavailable (file://).
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.ready.then(() => showVersion(true));
+}
 setConnected(false);
 autoConnect();
 </script>
