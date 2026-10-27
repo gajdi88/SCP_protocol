@@ -143,6 +143,10 @@ public class AmpService extends Service {
         }
 
         session = new MediaSession(this, "SCP");
+        // Volume key presses reach the VolumeProvider through the session's callback
+        // handler: with no callback set, MediaSession drops them silently, and the
+        // system still shows its volume panel as if they had worked.
+        session.setCallback(new MediaSession.Callback() {}, main);
         session.setPlaybackState(new PlaybackState.Builder()
                 .setState(PlaybackState.STATE_PLAYING, 0, 0f).build());
 

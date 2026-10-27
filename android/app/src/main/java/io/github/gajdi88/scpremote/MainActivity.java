@@ -6,6 +6,7 @@ import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
+import android.graphics.Insets;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
@@ -15,6 +16,7 @@ import android.provider.Settings;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
+import android.view.WindowInsets;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
@@ -152,6 +154,16 @@ public class MainActivity extends Activity implements AmpService.Listener {
         ScrollView scroll = new ScrollView(this);
         scroll.setBackgroundColor(BG);
         scroll.addView(root);
+        // Android 15 draws apps edge to edge, under the status and navigation bars,
+        // so keep the content clear of them. Older versions lay out below the bars.
+        if (Build.VERSION.SDK_INT >= 35) {
+            scroll.setOnApplyWindowInsetsListener((v, insets) -> {
+                Insets bars = insets.getInsets(WindowInsets.Type.systemBars()
+                        | WindowInsets.Type.displayCutout());
+                root.setPadding(pad + bars.left, pad + bars.top, pad + bars.right, pad + bars.bottom);
+                return insets;
+            });
+        }
         setContentView(scroll);
     }
 
