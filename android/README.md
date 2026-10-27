@@ -1,8 +1,10 @@
 # SCP Remote (Android)
 
-A small native companion to the web app in `../app/`. It does one thing the web
-app cannot: while it is connected, **the phone's volume buttons change the amp's
-main volume, including with the screen off.** The subwoofer is never touched.
+The native version of the web app in `../app/`: master volume, subwoofer level
+and input selection on one screen. It also does one thing the web app cannot:
+while it is connected, **the phone's volume buttons change the amp's main
+volume, including with the screen off.** The buttons never touch the
+subwoofer; that is set from the screen only.
 
 ## Installing
 
@@ -29,6 +31,9 @@ A notification shows the connection and volume while it runs. While connected:
 To give the volume buttons back to the phone, tap **Stop** in the notification
 or the app. If the link drops, the buttons revert to the phone until it
 reconnects; it retries by itself, backing off to every 30 s while the amp is off.
+
+The input buttons show what the app last sent, as in the web app: the amp does
+not report its selected input.
 
 **Forget this amp** clears the remembered board, for when it is replaced.
 
