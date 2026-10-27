@@ -23,7 +23,7 @@
         android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:label="SCP Remote"
-        android:theme="@android:style/Theme.DeviceDefault">
+        android:theme="@android:style/Theme.DeviceDefault.NoActionBar">
 
         <activity
             android:name=".MainActivity"
