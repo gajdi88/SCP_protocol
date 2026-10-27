@@ -18,8 +18,9 @@ android {
         versionName "1.0.$build"
     }
 
-    // One fixed key, kept in the repo, so every build can update the installed
-    // app. Android refuses an update signed with a different key.
+    // One fixed key for every build, so each APK can update the installed app:
+    // Android refuses an update signed with a different key. The key is not in
+    // the repo; the workflow places it here (see .github/workflows/android.yml).
     signingConfigs {
         fixed {
             storeFile file('../scp-remote.keystore')

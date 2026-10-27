@@ -59,8 +59,11 @@ GitHub Actions builds it (`.github/workflows/android.yml`) on every change under
 `android/` and, on `main`, publishes it as the latest release. Locally:
 `./gradlew assembleRelease` with an Android SDK.
 
-The signing key, `scp-remote.keystore`, is committed on purpose: Android only
-accepts an update signed with the same key as the installed app, and keeping it
-here means every build can update the last one. The cost is that anyone with
-the repo could sign an app that installs over this one, which only matters if
-they could also get you to install it.
+Android only installs an update if it is signed with the same key as the
+installed app. The key is not in the repo, which is public. The first build on
+`main` generates one and the GitHub Actions cache keeps it for later builds.
+A cache entry unused for 7 days is evicted. If that happens, the next APK has a
+new key and Android refuses it as an update: uninstall SCP Remote once and
+install the new one. To make the key permanent, store a base64 keystore as the
+repository secret `SCP_KEYSTORE_B64`. The build then uses that instead, which
+also means one uninstall when you switch.

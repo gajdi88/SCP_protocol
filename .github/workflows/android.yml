@@ -27,6 +27,30 @@ jobs:
 
       - uses: gradle/actions/setup-gradle@v4
 
+      # The signing key must stay the same from build to build, or the phone
+      # refuses to install an update over the previous version. It is not in the
+      # repo (the repo is public). A SCP_KEYSTORE_B64 secret wins if one is set;
+      # otherwise the first main build makes a key and the Actions cache keeps
+      # it. Pull requests get a throwaway key and never touch the cached one.
+      - name: Restore signing key
+        if: github.event_name != 'pull_request'
+        uses: actions/cache@v4
+        with:
+          path: android/scp-remote.keystore
+          key: scp-signing-key-v1
+
+      - name: Signing key
+        env:
+          KEY_B64: ${{ secrets.SCP_KEYSTORE_B64 }}
+        run: |
+          if [ -n "$KEY_B64" ]; then
+            echo "$KEY_B64" | base64 -d > android/scp-remote.keystore
+          elif [ ! -f android/scp-remote.keystore ]; then
+            keytool -genkeypair -keystore android/scp-remote.keystore -storetype PKCS12 \
+              -alias scp -keyalg RSA -keysize 2048 -validity 36500 \
+              -storepass scpremote -keypass scpremote -dname "CN=SCP Remote"
+          fi
+
       - name: Build
         working-directory: android
         run: ./gradlew --no-daemon assembleRelease
