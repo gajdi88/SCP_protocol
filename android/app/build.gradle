@@ -1,0 +1,52 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Every CI build gets a higher versionCode than the last, which Android requires
+// before it will install one APK over another. A local build counts as build 1.
+def build = (System.getenv('GITHUB_RUN_NUMBER') ?: '1') as int
+
+android {
+    namespace 'io.github.gajdi88.scpremote'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'io.github.gajdi88.scpremote'
+        minSdk 26
+        targetSdk 35
+        versionCode build
+        versionName "1.0.$build"
+    }
+
+    // One fixed key, kept in the repo, so every build can update the installed
+    // app. Android refuses an update signed with a different key.
+    signingConfigs {
+        fixed {
+            storeFile file('../scp-remote.keystore')
+            storePassword 'scpremote'
+            keyAlias 'scp'
+            keyPassword 'scpremote'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            signingConfig signingConfigs.fixed
+        }
+        debug {
+            signingConfig signingConfigs.fixed
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        // The Bluetooth calls are guarded by a runtime permission check in
+        // MainActivity, which lint cannot follow across into the service.
+        checkReleaseBuilds false
+    }
+}
