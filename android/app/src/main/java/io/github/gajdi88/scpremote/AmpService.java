@@ -70,8 +70,8 @@ public class AmpService extends Service {
     static final long REPLY_MS = 2500;      // give up waiting for OK after this
     static final long SCAN_MS = 15000;
 
-    static final Pattern CEILING = Pattern.compile("master\\s+0\\.\\.(\\d+)");
-    static final Pattern LEVELS = Pattern.compile("master=(\\d+)");
+    static final Pattern CEILING = Pattern.compile("master\\s+0\\.\\.(\\d+),\\s*sub\\s+0\\.\\.(\\d+)");
+    static final Pattern LEVELS = Pattern.compile("master=(\\d+).*sub=(\\d+)");
 
     /** The activity listens here; both live on the main thread of one process. */
     interface Listener { void onStateChanged(); }
@@ -96,6 +96,12 @@ public class AmpService extends Service {
     int pendingSteps;       // presses made while a fresh read is outstanding
     int sentValue;
     long lastSync;
+
+    // The sub and the input are set from the screen only, never by the volume keys.
+    int maxSub = 23;
+    int subConfirmed = -1, subDesired = -1, subSent;
+    // The amp does not report its input, so this is what the app last asked for.
+    int inputWanted = -1, inputDone = -1, inputSent;
     int retry;
     boolean scanning;
 
@@ -176,6 +182,29 @@ public class AmpService extends Service {
             desired = clamp((desired >= 0 ? desired : confirmed) + dir);
         }
         showVolume();
+        pump();
+    }
+
+    /** Set the master volume directly, from the slider or the system volume panel. */
+    void setMaster(int v) {
+        if (!known) return;
+        desired = clamp(v);
+        pendingSteps = 0;
+        showVolume();
+        pump();
+    }
+
+    void setSub(int v) {
+        if (!known) return;
+        subDesired = Math.max(0, Math.min(maxSub, v));
+        notifyUi();
+        pump();
+    }
+
+    void setInput(int i) {
+        if (!known || i < 0 || i > 2) return;
+        inputWanted = i;
+        notifyUi();
         pump();
     }
 
@@ -413,6 +442,8 @@ public class AmpService extends Service {
         owed.clear();
         pendingSteps = 0;
         if (desired != confirmed) desired = confirmed;
+        subDesired = subConfirmed;
+        inputWanted = inputDone;
         setStatus("No answer from the amp — is it powered?");
         showVolume();
         // Until the first level is read the buttons are not claimed, so keep asking.
@@ -421,15 +452,23 @@ public class AmpService extends Service {
 
     final Runnable retryRead = () -> { needRead = true; pump(); };
 
-    /** Send whatever is next: a read if one is due, else the newest wanted level. */
+    /** Send whatever is next: a read if one is due, else the newest wanted settings. */
     void pump() {
         if (!ready || !owed.isEmpty()) return;
         if (needRead) {
             needRead = false;
             send("r", 'r');
-        } else if (known && desired >= 0 && desired != confirmed) {
+        } else if (!known) {
+            return;
+        } else if (desired >= 0 && desired != confirmed) {
             sentValue = desired;
             send("m " + desired, 'm');
+        } else if (subDesired >= 0 && subDesired != subConfirmed) {
+            subSent = subDesired;
+            send("s " + subDesired, 's');
+        } else if (inputWanted >= 0 && inputWanted != inputDone) {
+            inputSent = inputWanted;
+            send("i " + inputWanted, 'i');
         }
     }
 
@@ -462,6 +501,8 @@ public class AmpService extends Service {
                 max = ceiling;
                 if (known) installVolume();
             }
+            maxSub = Integer.parseInt(m.group(2));
+            notifyUi();
             return;
         }
 
@@ -472,6 +513,9 @@ public class AmpService extends Service {
             lastSync = System.currentTimeMillis();
             desired = clamp(confirmed + pendingSteps);
             pendingSteps = 0;
+            int sub = Integer.parseInt(m.group(2));
+            if (subDesired < 0 || subDesired == subConfirmed) subDesired = sub;   // no change pending
+            subConfirmed = sub;
             if (!known) {
                 known = true;
                 installVolume();
@@ -496,6 +540,12 @@ public class AmpService extends Service {
                     desired = confirmed;
                     needRead = true;
                 }
+            } else if (kind != null && kind == 's') {
+                if (ok) subConfirmed = subSent;
+                else { subDesired = subConfirmed; needRead = true; }
+            } else if (kind != null && kind == 'i') {
+                if (ok) inputDone = inputSent;
+                else inputWanted = inputDone;
             } else if (kind != null && kind == 'r' && !ok) {
                 pendingSteps = 0;
                 setStatus("The amp did not answer a level read");
@@ -517,13 +567,7 @@ public class AmpService extends Service {
                 main.post(() -> step(direction));
             }
             @Override public void onSetVolumeTo(int v) {
-                main.post(() -> {
-                    if (!known) return;
-                    desired = clamp(v);
-                    pendingSteps = 0;
-                    showVolume();
-                    pump();
-                });
+                main.post(() -> setMaster(v));
             }
         };
         session.setPlaybackToRemote(volume);

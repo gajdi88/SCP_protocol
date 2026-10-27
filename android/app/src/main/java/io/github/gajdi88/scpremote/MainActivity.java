@@ -5,6 +5,8 @@ import android.annotation.SuppressLint;
 import android.app.Activity;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.res.ColorStateList;
+import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -15,22 +17,33 @@ import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
 import android.widget.LinearLayout;
+import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 
 import java.util.ArrayList;
 import java.util.List;
 
 /**
- * One screen: the amp's master volume, -/+ buttons, the link status and the
- * version. The real work is in AmpService, which keeps running with the screen
- * off; opening this screen starts it, as the web app connects on launch.
+ * The same controls as the web app: master volume, subwoofer level and input.
+ * The real work is in AmpService, which keeps running with the screen off and
+ * also takes the phone's volume buttons for the master volume; opening this
+ * screen starts it, as the web app connects on launch.
  */
 public class MainActivity extends Activity implements AmpService.Listener {
 
-    static final int BG = 0xFF111417, PANEL = 0xFF1A1F24, TEXT = 0xFFE8EDF2, DIM = 0xFF8B97A3;
+    static final int BG = 0xFF111417, PANEL = 0xFF1A1F24, LINE = 0xFF2A3138, TEXT = 0xFFE8EDF2,
+            DIM = 0xFF8B97A3, ACCENT = 0xFF4A9EFF;
+    // Main, Optical, Extension: the colours the web app uses.
+    static final int[] INPUT_COLORS = {0xFF3ECF7E, 0xFFF5C542, 0xFF4A9EFF};
+    static final String[] INPUT_NAMES = {"Main", "Optical", "Extension"};
 
-    TextView volumeView, statusView, nameView;
+    TextView nameView, volumeView, subView, statusView;
+    SeekBar volumeBar, subBar;
+    Button down, up;
+    final Button[] inputs = new Button[3];
     Button startStop, battery, forget;
+    boolean draggingVolume, draggingSub;
     boolean asked;      // ask for permissions once per launch, not on every resume
 
     @Override protected void onCreate(Bundle state) {
@@ -40,43 +53,86 @@ public class MainActivity extends Activity implements AmpService.Listener {
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(BG);
-        int pad = dp(20);
+        int pad = dp(16);
         root.setPadding(pad, pad, pad, pad);
 
         nameView = text(15, TEXT);
         nameView.setText("MATCH UP 8DSP");
+        nameView.setPadding(0, 0, 0, dp(12));
         root.addView(nameView);
 
-        TextView label = text(13, DIM);
-        label.setText("VOLUME");
-        label.setPadding(0, dp(28), 0, 0);
-        root.addView(label);
-
-        volumeView = text(64, TEXT);
-        volumeView.setText("--");
-        root.addView(volumeView);
-
+        // ---- master volume
+        LinearLayout vol = card(root);
+        volumeView = valueRow(vol, "VOLUME", 44);
+        volumeBar = seekBar(vol, new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar b, int v, boolean fromUser) {
+                if (fromUser && AmpService.instance != null) AmpService.instance.setMaster(v);
+            }
+            @Override public void onStartTrackingTouch(SeekBar b) { draggingVolume = true; }
+            @Override public void onStopTrackingTouch(SeekBar b) {
+                draggingVolume = false;
+                if (AmpService.instance != null) AmpService.instance.setMaster(b.getProgress());
+            }
+        });
         LinearLayout row = new LinearLayout(this);
-        row.setOrientation(LinearLayout.HORIZONTAL);
-        Button down = button("−", v -> step(-1));
-        Button up = button("+", v -> step(1));
-        down.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28);
-        up.setTextSize(TypedValue.COMPLEX_UNIT_SP, 28);
-        row.addView(down, new LinearLayout.LayoutParams(0, dp(72), 1));
-        View gap = new View(this);
-        row.addView(gap, new LinearLayout.LayoutParams(dp(12), 1));
-        row.addView(up, new LinearLayout.LayoutParams(0, dp(72), 1));
-        root.addView(row);
+        row.setPadding(0, dp(8), 0, 0);
+        down = button("−", v -> step(-1));
+        up = button("+", v -> step(1));
+        down.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
+        up.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
+        row.addView(down, new LinearLayout.LayoutParams(0, dp(56), 1));
+        row.addView(new View(this), new LinearLayout.LayoutParams(dp(10), 1));
+        row.addView(up, new LinearLayout.LayoutParams(0, dp(56), 1));
+        vol.addView(row);
 
-        TextView hint = text(13, DIM);
-        hint.setText("While connected, the phone's volume buttons change the amp's main volume, "
-                + "also with the screen off. Stop the connection to give them back to the phone.");
-        hint.setPadding(0, dp(16), 0, dp(16));
-        root.addView(hint);
+        // ---- subwoofer
+        LinearLayout sub = card(root);
+        subView = valueRow(sub, "SUBWOOFER", 30);
+        subBar = seekBar(sub, new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar b, int v, boolean fromUser) {
+                if (fromUser && AmpService.instance != null) AmpService.instance.setSub(v);
+            }
+            @Override public void onStartTrackingTouch(SeekBar b) { draggingSub = true; }
+            @Override public void onStopTrackingTouch(SeekBar b) {
+                draggingSub = false;
+                if (AmpService.instance != null) AmpService.instance.setSub(b.getProgress());
+            }
+        });
 
-        statusView = text(14, DIM);
+        // ---- input
+        LinearLayout in = card(root);
+        TextView inLabel = text(13, DIM);
+        inLabel.setText("INPUT");
+        inLabel.setPadding(0, 0, 0, dp(10));
+        in.addView(inLabel);
+        LinearLayout inRow = new LinearLayout(this);
+        for (int i = 0; i < 3; i++) {
+            final int idx = i;
+            inputs[i] = button(INPUT_NAMES[i], v -> {
+                if (AmpService.instance != null) AmpService.instance.setInput(idx);
+            });
+            LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(0, dp(56), 1);
+            if (i > 0) p.leftMargin = dp(8);
+            inRow.addView(inputs[i], p);
+        }
+        in.addView(inRow);
+        TextView inHint = text(12, DIM);
+        inHint.setText("The amp does not report the selected input, so this shows what this "
+                + "app last sent, not necessarily the amp's state.");
+        inHint.setPadding(0, dp(10), 0, 0);
+        in.addView(inHint);
+
+        // ---- connection
+        statusView = text(13, DIM);
+        statusView.setGravity(Gravity.CENTER);
+        statusView.setPadding(0, dp(4), 0, dp(8));
         root.addView(statusView);
+
+        TextView hint = text(12, DIM);
+        hint.setText("While connected, the phone's volume buttons change the amp's main volume "
+                + "(never the subwoofer), also with the screen off. Stop the connection to give "
+                + "them back to the phone.");
+        root.addView(hint);
 
         startStop = button("Stop", v -> toggle());
         root.addView(startStop, full());
@@ -87,22 +143,24 @@ public class MainActivity extends Activity implements AmpService.Listener {
         });
         root.addView(forget, full());
 
-        View spring = new View(this);
-        root.addView(spring, new LinearLayout.LayoutParams(1, 0, 1));
-
         TextView version = text(11, DIM);
         version.setGravity(Gravity.CENTER);
+        version.setPadding(0, dp(16), 0, 0);
         version.setText("v" + versionName());
         root.addView(version);
 
-        setContentView(root);
+        ScrollView scroll = new ScrollView(this);
+        scroll.setBackgroundColor(BG);
+        scroll.addView(root);
+        setContentView(scroll);
     }
 
     @Override protected void onResume() {
         super.onResume();
         AmpService.listener = this;
-        if (AmpService.instance == null && !asked) startIfAllowed();
-        else AmpService.instance.refresh();
+        AmpService s = AmpService.instance;
+        if (s != null) s.refresh();
+        else if (!asked) startIfAllowed();
         onStateChanged();
     }
 
@@ -181,18 +239,48 @@ public class MainActivity extends Activity implements AmpService.Listener {
     @Override public void onStateChanged() {
         AmpService s = AmpService.instance;
         boolean running = s != null;
+        boolean live = running && s.known;
         startStop.setText(running ? "Stop" : "Connect");
         battery.setVisibility(batteryExempt() ? View.GONE : View.VISIBLE);
         forget.setVisibility(running && s.deviceName() != null ? View.VISIBLE : View.GONE);
-        if (!running) {
+        for (View v : new View[]{volumeBar, subBar, down, up, inputs[0], inputs[1], inputs[2]}) {
+            v.setEnabled(live);
+            v.setAlpha(live ? 1f : 0.4f);
+        }
+
+        String name = running ? s.deviceName() : null;
+        nameView.setText(name != null ? "MATCH UP 8DSP  ·  " + name : "MATCH UP 8DSP");
+        statusView.setText(running ? s.status : "Not connected");
+
+        if (!live) {
             volumeView.setText("--");
-            statusView.setText("Not connected");
-            nameView.setText("MATCH UP 8DSP");
+            subView.setText("--");
+            paintInputs(-1);
             return;
         }
-        nameView.setText(s.deviceName() != null ? "MATCH UP 8DSP  ·  " + s.deviceName() : "MATCH UP 8DSP");
-        volumeView.setText(s.known && s.shown() >= 0 ? s.shown() + " / " + s.max : "--");
-        statusView.setText(s.status);
+        volumeBar.setMax(s.max);
+        subBar.setMax(s.maxSub);
+        int v = Math.max(0, s.shown());
+        int sv = Math.max(0, s.subDesired);
+        volumeView.setText(v + " / " + s.max);
+        subView.setText(sv + " / " + s.maxSub);
+        if (!draggingVolume) volumeBar.setProgress(v);
+        if (!draggingSub) subBar.setProgress(sv);
+        paintInputs(s.inputWanted);
+    }
+
+    void paintInputs(int selected) {
+        for (int i = 0; i < 3; i++) {
+            boolean on = i == selected;
+            int c = INPUT_COLORS[i];
+            GradientDrawable bg = new GradientDrawable();
+            bg.setCornerRadius(dp(11));
+            bg.setColor(on ? (c & 0x00FFFFFF) | 0x26000000 : 0x00000000);   // ~15% tint
+            bg.setStroke(dp(1), on ? c : LINE);
+            inputs[i].setBackground(bg);
+            inputs[i].setBackgroundTintList(null);
+            inputs[i].setTextColor(on ? c : DIM);
+        }
     }
 
     String versionName() {
@@ -220,8 +308,52 @@ public class MainActivity extends Activity implements AmpService.Listener {
         b.setText(label);
         b.setAllCaps(false);
         b.setTextColor(TEXT);
-        b.setBackgroundTintList(android.content.res.ColorStateList.valueOf(PANEL));
+        b.setBackgroundTintList(ColorStateList.valueOf(PANEL));
         b.setOnClickListener(l);
+        return b;
+    }
+
+    /** A rounded panel like the web app's cards, added to the parent. */
+    LinearLayout card(LinearLayout parent) {
+        LinearLayout c = new LinearLayout(this);
+        c.setOrientation(LinearLayout.VERTICAL);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(PANEL);
+        bg.setCornerRadius(dp(14));
+        bg.setStroke(dp(1), LINE);
+        c.setBackground(bg);
+        int p = dp(16);
+        c.setPadding(p, p, p, p);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+        lp.bottomMargin = dp(12);
+        parent.addView(c, lp);
+        return c;
+    }
+
+    /** Label on the left, large value on the right; returns the value view. */
+    TextView valueRow(LinearLayout card, String label, int valueSp) {
+        LinearLayout row = new LinearLayout(this);
+        row.setGravity(Gravity.BOTTOM);
+        TextView l = text(13, DIM);
+        l.setText(label);
+        row.addView(l, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        TextView v = text(valueSp, TEXT);
+        v.setText("--");
+        row.addView(v);
+        card.addView(row);
+        return v;
+    }
+
+    SeekBar seekBar(LinearLayout card, SeekBar.OnSeekBarChangeListener l) {
+        SeekBar b = new SeekBar(this);
+        b.setProgressTintList(ColorStateList.valueOf(ACCENT));
+        b.setThumbTintList(ColorStateList.valueOf(ACCENT));
+        b.setProgressBackgroundTintList(ColorStateList.valueOf(LINE));
+        b.setOnSeekBarChangeListener(l);
+        b.setPadding(dp(4), dp(14), dp(4), dp(14));
+        card.addView(b, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         return b;
     }
 
