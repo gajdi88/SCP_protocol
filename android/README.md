@@ -37,6 +37,27 @@ not report its selected input.
 
 **Forget this amp** clears the remembered board, for when it is replaced.
 
+### Amp tools (ESP32 firmware v8 or later)
+
+- **Download log** fetches the ESP32's event log: unexpected amp behaviour,
+  amp power changes, start-up sequence results and ESP32 restarts. When it
+  finishes, save it as a text file (the system's "save as" screen, so it can go
+  to Downloads or Drive) or share it. The app sends the phone's clock to the
+  ESP32 on every connect, so log lines written after that carry a real date.
+- **Re-run start-up sequence** makes the ESP32 replay what the CONDUCTOR knob
+  sends when the amp switches on. The ESP32 already does this by itself when it
+  sees the amp come up and when the amp refuses a write. The button is for the
+  case where neither happened and the amp still is not answering, which leaves
+  the controls greyed out with no write to trigger it. So it works without a
+  level reading, unlike the other controls.
+
+Both buttons need only the Bluetooth link. With older firmware they stay
+disabled and say so.
+
+When the ESP32 reports the amp switching on, the app reads the levels again.
+If the amp refuses the first level read, the app keeps retrying every 3 s
+instead of leaving the controls disabled.
+
 ## Limitations
 
 - **One connection at a time.** The ESP32 bridge accepts one Bluetooth client, so
