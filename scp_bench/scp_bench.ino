@@ -39,6 +39,12 @@
 // BEFORE UPLOADING: Tools -> Partition Scheme -> "Huge APP (3MB No OTA)".
 // The BLE stack is ~1.3 MB; the default scheme gives the app only 1.2 MB.
 //
+// v8.1: v8 pulled RX down to read the amp's power state from its TX line, and the
+// amp then went completely silent (28 Oct 2026 log: not one byte in four boots,
+// the line never read high). The amp evidently does not drive its TX line high
+// itself; the knob, and the RX pull-up v7 inherited from the UART driver, do. So
+// RX is pulled up again, and "the amp came up" is now judged by the amp starting
+// to answer after silence, which then triggers the handshake.
 // v8: behaves like the knob at amp power-up. The amp's TX line is watched; once
 // it has been high for a second (the knob's own delay, spec section 5) the full
 // handshake is replayed: reads of 00, 03, 04, 05, 06, 07, 09, then the enable. A
@@ -364,6 +370,33 @@ size_t buildRequest(uint8_t *out, uint8_t cmd, uint8_t reg, const uint8_t *data,
   return i;
 }
 
+// ---- is the amp there? ---------------------------------------------------
+// The line's idle level cannot say: it needs a pull-up to read high at all (see
+// v8.1 above), so it reads high with the amp off too. What can say is whether the
+// amp answers. The first answer after silence counts as the amp having come up,
+// and the knob's handshake follows from loop(), once the current command is done.
+// Three unanswered requests in a row count as the amp having gone.
+static const int SILENT_LIMIT = 3;
+bool ampAnswering = false;
+bool handshakeDue = false;
+int  silentInARow = 0;
+
+void noteAnswer() {
+  silentInARow = 0;
+  if (ampAnswering) return;
+  ampAnswering = true;
+  handshakeDue = true;
+  logEvent("amp answering");
+  io.print("amp on\r\n");
+}
+
+void noteSilence() {
+  if (++silentInARow < SILENT_LIMIT || !ampAnswering) return;
+  ampAnswering = false;
+  logEvent("amp silent: %d requests in a row unanswered", SILENT_LIMIT);
+  io.print("amp off\r\n");
+}
+
 // Every byte readReply() saw, and why it gave up, so a failure can be logged with
 // the evidence rather than just "no reply".
 uint8_t     rxRaw[112];
@@ -413,6 +446,9 @@ size_t transact(uint8_t cmd, uint8_t reg, const uint8_t *data, uint8_t n, uint8_
     logEvent("no valid reply (%s) to %s, received: %s", rxErr,
              toHex(hq, sizeof hq, req, len), rxRawLen ? toHex(hr, sizeof hr, rxRaw, rxRawLen) : "nothing");
   }
+  // After the failure itself is logged, so the log reads cause, then conclusion.
+  if (r) noteAnswer();
+  else if (!rxRawLen) noteSilence();              // garbage still means something is there
   // Printing happens AFTER the exchange, not between request and reply. A BLE notify
   // costs several ms; the amp answers in well under one. Printing first would leave
   // the reply sitting in the UART FIFO while we block. Console output order is
@@ -534,6 +570,7 @@ bool handshake(const char *why) {
     else rememberRegister(reg, data, n);
   }
   bool enabled = enableWrites();
+  handshakeDue = false;                           // done, whichever way it went
   logEvent("handshake (%s): %d of %u reads answered, enable %s", why, answered,
            (unsigned)sizeof HANDSHAKE_READS, enabled ? "accepted" : "NOT accepted");
   return enabled;
@@ -555,32 +592,6 @@ bool setInput(long idx) {
 }
 
 // ---- watching the amp -----------------------------------------------------
-// The amp drives its TX line high whenever it is running (spec section 5: it
-// comes up a second before the knob does), so the line's idle level says whether
-// the amp is on, without sending anything. The RX pin is pulled down so that a
-// powered-off amp reads low instead of floating.
-static const uint32_t AMP_UP_MS   = 1000;        // the knob's delay after the amp
-static const uint32_t AMP_DOWN_MS = 200;         // a frame never holds the line low this long
-bool     ampUp = false;
-int      lineLevel = -1;
-uint32_t lineSince = 0;
-
-void watchAmpLine() {
-  int level = gpio_get_level((gpio_num_t)PIN_RX);
-  uint32_t now = millis();
-  if (level != lineLevel) { lineLevel = level; lineSince = now; return; }
-  if (!ampUp && level == 1 && now - lineSince >= AMP_UP_MS) {
-    ampUp = true;
-    logEvent("amp line up");
-    io.print("amp on\r\n");
-    handshake("amp came up");
-  } else if (ampUp && level == 0 && now - lineSince >= AMP_DOWN_MS) {
-    ampUp = false;
-    logEvent("amp line down");
-    io.print("amp off\r\n");
-  }
-}
-
 // Bytes arriving while no request is outstanding: the amp speaking unprompted,
 // which no capture has ever shown. Collected until the line has been quiet 5 ms.
 void watchUnsolicited() {
@@ -589,11 +600,6 @@ void watchUnsolicited() {
   while (millis() - last < 5) {
     if (scp.available()) { int c = scp.read(); if (n < sizeof b) b[n++] = (uint8_t)c; last = millis(); }
   }
-  // An amp switching off drops its TX line, which the UART can read as a stray
-  // 00 byte (a break). That is the power event, already logged, not a message.
-  bool zeros = true;
-  for (size_t k = 0; k < n; k++) if (b[k]) zeros = false;
-  if (zeros && gpio_get_level((gpio_num_t)PIN_RX) == 0) return;
   char h[300];
   logEvent("unsolicited from amp (%u bytes): %s", (unsigned)n, toHex(h, sizeof h, b, n));
 }
@@ -639,8 +645,8 @@ void showDiag() {
   io.print("session "); printDuration(bleConnected ? now - connectedAtMs : lastSessionMs);
   io.print("   longest "); printDuration(longestSessionMs);
   io.printf("   heap %lu\r\n", (unsigned long)ESP.getFreeHeap());
-  io.printf("amp line %s   boot #%lu   log %u bytes%s   clock %s\r\n",
-            ampUp ? "up" : "down", (unsigned long)bootCount,
+  io.printf("amp answering %s   boot #%lu   log %u bytes%s   clock %s\r\n",
+            ampAnswering ? "yes" : "no", (unsigned long)bootCount,
             (unsigned)(fileSize(LOG_OLD) + fileSize(LOG_PATH)), logReady ? "" : " (flash unavailable)",
             syncEpoch ? "set" : "not set");
 }
@@ -748,14 +754,16 @@ void setup() {
   bootCount = prefs.getUInt("boots", 0) + 1;
   prefs.putUInt("boots", bootCount);
   logReady = LittleFS.begin(true);                 // formats the partition on first use
-  logEvent("boot: firmware v8, reset by %s%s", resetReason(), logReady ? "" : ", flash log unavailable");
+  logEvent("boot: firmware v8.1, reset by %s%s", resetReason(), logReady ? "" : ", flash log unavailable");
 
   scp.begin(230400, SERIAL_8N1, PIN_RX, PIN_TX);
-  // Pull RX down, not up, so a powered-off amp reads low (see watchAmpLine).
-  gpio_pullup_dis((gpio_num_t)PIN_RX);
-  gpio_pulldown_en((gpio_num_t)PIN_RX);
+  // Pull RX UP. The amp's TX line needs it to read high between bytes, as the knob
+  // provides; v8's pull-down silenced the amp entirely (see v8.1 at the top). The
+  // UART driver normally sets this already; it is stated here so nothing undoes it.
+  gpio_pulldown_dis((gpio_num_t)PIN_RX);
+  gpio_pullup_en((gpio_num_t)PIN_RX);
   startBle();
-  Serial.printf("\r\nSCP bench v8 ready, advertising as \"%s\". '?' for help.\r\n", deviceName);
+  Serial.printf("\r\nSCP bench v8.1 ready, advertising as \"%s\". '?' for help.\r\n", deviceName);
   Serial.print("If you missed this banner, just type '?' - the console is live either way.\r\n");
 }
 
@@ -776,8 +784,9 @@ void loop() {
     else buf = "";                                 // non-printable: drop the line
   }
 
-  // 3. the amp: power state from its TX line, and anything it says unasked
-  watchAmpLine();
+  // 3. the amp: the knob's handshake once it has started answering, and anything
+  //    it says unasked
+  if (handshakeDue) handshake("amp started answering");
   watchUnsolicited();
 
   // 4. restart advertising after a disconnect

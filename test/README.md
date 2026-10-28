@@ -16,7 +16,7 @@ after you do.
 
 | Suite | Covers |
 |---|---|
-| `bench_test.cpp` | `scp_bench`: framing, the write-enable retry, per-target ceilings, strict number parsing, the BLE queue and chunking, advertising recovery, diagnostics, the verbosity toggle, and behaviour with no amp attached. Since v8 also: the knob's power-up handshake byte for byte, the handshake replacing a bare enable after a refused write, amp power-up/down detection from the TX line, and the event log (framing of the `log` dump, repeat collapsing, unsolicited bytes, register change tracking across boots, the clock, rotation, reset reasons, a flash that will not mount) |
+| `bench_test.cpp` | `scp_bench`: framing, the write-enable retry, per-target ceilings, strict number parsing, the BLE queue and chunking, advertising recovery, diagnostics, the verbosity toggle, and behaviour with no amp attached. Since v8 also: the knob's power-up handshake byte for byte, the handshake replacing a bare enable after a refused write, amp come-and-go detection from its answers (v8.1), the RX pull-up, and the event log (framing of the `log` dump, repeat collapsing, unsolicited bytes, register change tracking across boots, the clock, rotation, reset reasons, a flash that will not mount) |
 | `amp_sim_test.cpp` | `amp_sim` against **every captured frame in the spec**, byte for byte |
 | `app_test.mjs` | The web app's chunk reassembly, both regexes, connect retry, level-read retry and slider throttling (needs `node`) |
 
@@ -48,9 +48,9 @@ regexes there have changed, so the JavaScript copies cannot silently rot.
 - **Real flash and NVS.** `shim/LittleFS.h` and `shim/Preferences.h` keep files and
   keys in memory. They prove what the log writes and when it rotates, not how the
   flash wears or behaves on a power cut.
-- **The amp's TX line as a level.** `shim/driver/gpio.h` lets a test set the pin
-  level directly, so whether a real amp in standby actually drops that line is
-  still for the bench to show.
+- **Electrical pull-ups.** `shim/driver/gpio.h` only records which pulls the
+  sketch asked for. That RX must be pulled up came from the real amp going
+  silent under v8's pull-down; the test only stops that change coming back.
 - **Wiring and electrical behaviour.** That is what `amp_sim` and a DMM are for.
 
 ## Layout
@@ -61,7 +61,7 @@ shim/BLEDevice.h    stubbed Bluedroid BLE; records notifications
 shim/support.h      assertions and hex helpers shared by both programs
 shim/LittleFS.h     in-memory file system, for the event log
 shim/Preferences.h  in-memory NVS, for the boot counter and remembered registers
-shim/driver/gpio.h  settable pin levels, standing in for the amp's TX line
+shim/driver/gpio.h  records the RX pin's pull-up / pull-down configuration
 shim/esp_system.h   esp_reset_reason(), with the reason a test chooses
 ```
 
