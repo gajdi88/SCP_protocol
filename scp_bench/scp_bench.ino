@@ -18,7 +18,12 @@
 // Numbers are DECIMAL unless written 0x.. :
 //   r        read levels          m N   master level       s N   sub level
 //   i N      input (0 main, 1 optical, 2 ext)              + / - master step
-//   e        send write-enable    d     BLE diagnostics      ?     help
+//   e        send write-enable    d     diagnostics          ?     help
+//   h        replay the knob's power-up handshake (reads + enable)
+//   g N      read register N and print its data bytes
+//   t N      set the log clock: N = Unix time, sent by an app on connect
+//   log      print the event log between LOG BEGIN / LOG END lines
+//   log clear  erase the event log
 //   v 0/1    frame tracing off/on (an app sends 'v 0'; default on for USB work)
 //
 // BLE: Nordic UART Service, advertised as "SCP-xxxx" where xxxx is derived from
@@ -34,6 +39,11 @@
 // BEFORE UPLOADING: Tools -> Partition Scheme -> "Huge APP (3MB No OTA)".
 // The BLE stack is ~1.3 MB; the default scheme gives the app only 1.2 MB.
 //
+// v8: behaves like the knob at amp power-up. The amp's TX line is watched; once
+// it has been high for a second (the knob's own delay, spec section 5) the full
+// handshake is replayed: reads of 00, 03, 04, 05, 06, 07, 09, then the enable. A
+// refused write also triggers it. Unexpected amp behaviour is kept in an event
+// log in flash ('log'), which an app can download.
 // v7: builds for ESP32-H2 and other two-UART parts, which have no Serial2.
 // v6: advertise the name in the primary packet and the 128-bit service UUID in the
 // scan response, so neither packet can overflow the 31-byte advertising limit.
@@ -50,6 +60,12 @@
 #include <BLEDevice.h>
 #include <BLEServer.h>
 #include <BLEUtils.h>
+#include <LittleFS.h>
+#include <Preferences.h>
+#include <driver/gpio.h>
+#include <esp_system.h>
+#include <stdarg.h>
+#include <time.h>
 #if __has_include(<BLE2902.h>)
   #include <BLE2902.h>              // arduino-esp32 2.x needs the CCCD added by hand
   #define HAS_BLE2902 1             // 3.x adds it automatically and drops this header
@@ -189,6 +205,154 @@ void beginAdvertising() {
   advertising = true;
 }
 
+// ---- event log -------------------------------------------------------------
+// Anything unexpected from the amp, plus amp power and handshake events, goes to
+// a text file in flash, so it survives a power cut and can be fetched later over
+// BLE with 'log'. Normal traffic is NOT logged: the point is to make the rare odd
+// event findable, not to record every volume step. Two files of LOG_MAX each:
+// when the current one fills, it replaces the old one.
+//
+// Lines start with '#' and never contain "master=", so an app parsing the
+// console for levels cannot mistake a log line for a reading.
+static const char  *LOG_PATH = "/log.txt";
+static const char  *LOG_OLD  = "/log.old";
+static const size_t LOG_MAX  = 64 * 1024;     // x2 files, about a minute over BLE
+static const size_t MSG_MAX  = 320;
+
+Preferences prefs;
+bool     logReady  = false;
+uint32_t bootCount = 0;
+uint32_t syncEpoch = 0, syncMs = 0;           // wall clock from the phone ('t N')
+char     lastMsg[MSG_MAX] = "";
+uint32_t lastMsgMs = 0, repeats = 0;
+
+// "#12 00:03:21.456", plus " 2026-10-28T12:00:01Z" once a phone has set the clock.
+// The boot number tells events from different power-ups apart; without a clock
+// that, and the uptime, is all there is.
+void stamp(char *out, size_t cap) {
+  uint32_t ms = millis(), s = ms / 1000;
+  int n = snprintf(out, cap, "#%lu %02lu:%02lu:%02lu.%03lu", (unsigned long)bootCount,
+                   (unsigned long)(s / 3600), (unsigned long)(s / 60 % 60),
+                   (unsigned long)(s % 60), (unsigned long)(ms % 1000));
+  if (syncEpoch && n > 0 && (size_t)n < cap) {
+    time_t t = (time_t)syncEpoch + (time_t)((ms - syncMs) / 1000);
+    struct tm tm;
+    gmtime_r(&t, &tm);
+    strftime(out + n, cap - n, " %Y-%m-%dT%H:%M:%SZ", &tm);
+  }
+}
+
+size_t fileSize(const char *path) {
+  if (!logReady || !LittleFS.exists(path)) return 0;
+  File f = LittleFS.open(path, FILE_READ);
+  size_t n = f ? f.size() : 0;
+  if (f) f.close();
+  return n;
+}
+
+void appendLog(const char *msg) {
+  char ts[48];
+  stamp(ts, sizeof ts);
+  Serial.printf("[log] %s %s\r\n", ts, msg);      // USB only, never over BLE
+  if (!logReady) return;
+  if (fileSize(LOG_PATH) > LOG_MAX) {
+    LittleFS.remove(LOG_OLD);
+    LittleFS.rename(LOG_PATH, LOG_OLD);
+  }
+  File f = LittleFS.open(LOG_PATH, FILE_APPEND);
+  if (!f) return;
+  f.printf("%s %s\n", ts, msg);
+  f.close();                                      // closed per line: a power cut loses nothing
+}
+
+void flushRepeats() {
+  if (!repeats) return;
+  char m[64];
+  snprintf(m, sizeof m, "(previous line repeated %lu more times)", (unsigned long)repeats);
+  repeats = 0;
+  appendLog(m);
+}
+
+void logEvent(const char *fmt, ...) {
+  char msg[MSG_MAX];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(msg, sizeof msg, fmt, ap);
+  va_end(ap);
+  // A fault that repeats - an amp that stays silent while the app keeps asking -
+  // becomes one line and a count, not a flood that pushes everything else out.
+  uint32_t now = millis();
+  if (!strcmp(msg, lastMsg) && now - lastMsgMs < 60000) {
+    repeats++;
+    lastMsgMs = now;
+    return;
+  }
+  flushRepeats();
+  strncpy(lastMsg, msg, sizeof lastMsg - 1);
+  lastMsgMs = now;
+  appendLog(msg);
+}
+
+// "AA BB CC", truncated with ".." if it will not fit.
+const char *toHex(char *out, size_t cap, const uint8_t *b, size_t n) {
+  size_t at = 0;
+  out[0] = '\0';
+  for (size_t k = 0; k < n; k++) {
+    if (at + 4 >= cap) { if (at + 3 < cap) strcpy(out + at, ".."); break; }
+    at += snprintf(out + at, cap - at, k ? " %02X" : "%02X", b[k]);
+  }
+  return out;
+}
+
+const char *resetReason() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "power-on";
+    case ESP_RST_SW:        return "software";
+    case ESP_RST_PANIC:     return "crash";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:       return "watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep sleep";
+    case ESP_RST_BROWNOUT:  return "brownout (supply dipped)";
+    case ESP_RST_EXT:       return "reset pin";
+    default:                return "other";
+  }
+}
+
+void dumpLog() {
+  flushRepeats();
+  io.printf("LOG BEGIN %u\r\n", (unsigned)(fileSize(LOG_OLD) + fileSize(LOG_PATH)));
+  const char *files[2] = {LOG_OLD, LOG_PATH};     // oldest first
+  for (const char *path : files) {
+    if (!fileSize(path)) continue;
+    File f = LittleFS.open(path, FILE_READ);
+    if (!f) continue;
+    char buf[MSG_MAX + 64];
+    size_t n = 0;
+    while (f.available()) {
+      char c = (char)f.read();
+      if (c == '\n' || n == sizeof buf - 1) {
+        buf[n] = '\0';
+        io.print(buf);
+        io.print("\r\n");
+        n = 0;
+        if (c == '\n') continue;
+      }
+      if (c != '\n') buf[n++] = c;
+    }
+    if (n) { buf[n] = '\0'; io.print(buf); io.print("\r\n"); }
+    f.close();
+  }
+  io.print("LOG END\r\n");
+}
+
+void clearLog() {
+  if (logReady) { LittleFS.remove(LOG_OLD); LittleFS.remove(LOG_PATH); }
+  repeats = 0;
+  lastMsg[0] = '\0';
+  logEvent("log cleared");
+}
+
 // ---- framing -------------------------------------------------------------
 // request: 42 LEN ~LEN 01 CMD REG data... CS     LEN = 3 + ndata, CS = CMD+REG+data
 size_t buildRequest(uint8_t *out, uint8_t cmd, uint8_t reg, const uint8_t *data, uint8_t n) {
@@ -200,18 +364,33 @@ size_t buildRequest(uint8_t *out, uint8_t cmd, uint8_t reg, const uint8_t *data,
   return i;
 }
 
+// Every byte readReply() saw, and why it gave up, so a failure can be logged with
+// the evidence rather than just "no reply".
+uint8_t     rxRaw[112];
+size_t      rxRawLen = 0;
+const char *rxErr    = "";
+
+int scpRead() {                                   // read one byte and keep a copy
+  int b = scp.read();
+  if (b >= 0 && rxRawLen < sizeof rxRaw) rxRaw[rxRawLen++] = (uint8_t)b;
+  return b;
+}
+
 // reply: 43 LEN ~LEN then LEN+2 bytes (01 CMD REG data... CS). Returns body length, 0 on failure.
 size_t readReply(uint8_t *body, size_t cap, uint32_t timeoutMs = 50) {
   uint8_t hdr[3]; size_t got = 0; uint32_t t0 = millis();
+  rxRawLen = 0;
   while (got < 3 && millis() - t0 < timeoutMs)
-    if (scp.available()) { uint8_t b = scp.read(); if (got || b == 0x43) hdr[got++] = b; }
-  if (got < 3 || (uint8_t)(hdr[1] + hdr[2]) != 0xFF) return 0;
-  size_t need = hdr[1] + 2; if (need > cap) return 0;
+    if (scp.available()) { uint8_t b = scpRead(); if (got || b == 0x43) hdr[got++] = b; }
+  if (got < 3) { rxErr = rxRawLen ? "no 43 header" : "silence"; return 0; }
+  if ((uint8_t)(hdr[1] + hdr[2]) != 0xFF) { rxErr = "LEN and ~LEN disagree"; return 0; }
+  size_t need = hdr[1] + 2; if (need > cap) { rxErr = "longer than expected"; return 0; }
   got = 0;
-  while (got < need && millis() - t0 < timeoutMs) if (scp.available()) body[got++] = scp.read();
-  if (got < need) return 0;
+  while (got < need && millis() - t0 < timeoutMs) if (scp.available()) body[got++] = scpRead();
+  if (got < need) { rxErr = "cut short"; return 0; }
   uint8_t cs = 0; for (size_t k = 1; k + 1 < need; k++) cs += body[k];
-  return cs == body[need - 1] ? need : 0;
+  if (cs != body[need - 1]) { rxErr = "bad checksum"; return 0; }
+  return need;
 }
 
 void dump(const char *tag, const uint8_t *b, size_t n) {
@@ -220,9 +399,20 @@ void dump(const char *tag, const uint8_t *b, size_t n) {
 
 size_t transact(uint8_t cmd, uint8_t reg, const uint8_t *data, uint8_t n, uint8_t *body, size_t cap) {
   uint8_t req[32]; size_t len = buildRequest(req, cmd, reg, data, n);
-  while (scp.available()) scp.read();          // flush stale bytes
+  // Anything already waiting was sent by the amp unasked. The spec says it never
+  // does that, so these bytes used to be thrown away; now they are evidence.
+  if (scp.available()) {
+    uint8_t stale[64]; size_t k = 0; char h[200];
+    while (scp.available()) { int b = scp.read(); if (k < sizeof stale) stale[k++] = (uint8_t)b; }
+    logEvent("unsolicited bytes before a request: %s", toHex(h, sizeof h, stale, k));
+  }
   scp.write(req, len); scp.flush();
   size_t r = readReply(body, cap);
+  if (!r) {
+    char hq[100], hr[340];
+    logEvent("no valid reply (%s) to %s, received: %s", rxErr,
+             toHex(hq, sizeof hq, req, len), rxRawLen ? toHex(hr, sizeof hr, rxRaw, rxRawLen) : "nothing");
+  }
   // Printing happens AFTER the exchange, not between request and reply. A BLE notify
   // costs several ms; the amp answers in well under one. Printing first would leave
   // the reply sitting in the UART FIFO while we block. Console output order is
@@ -245,15 +435,26 @@ bool enableWrites() {                             // write reg 01 = 01 01
 // amp's "writes not enabled" reply: 01 2B 01 00 CS
 bool isRejection(const uint8_t *b, size_t r) { return r == 5 && b[1] == 0x2B && b[2] == 0x01 && b[3] == 0x00; }
 
+bool handshake(const char *why);
+
 bool writeReg(uint8_t reg, uint8_t a, uint8_t b, uint8_t c) {
   uint8_t d[3] = {a, b, c}, body[16];
   for (int attempt = 0; attempt < 2; attempt++) {
     size_t r = transact(0x2B, reg, d, 3, body, sizeof body);
     if (r >= 7 && body[1] == 0x2B && body[2] == reg && body[3] == a && body[4] == b && body[5] == c) return true;
     if (attempt == 0 && isRejection(body, r)) {
-      io.print("amp says writes not enabled: enabling and retrying\r\n");
-      if (!enableWrites()) return false;
-    } else return false;
+      // The amp forgets the enable when it restarts, so a refusal means it has
+      // restarted without us noticing. Greet it the way the knob would.
+      io.print("amp says writes not enabled: handshaking and retrying\r\n");
+      logEvent("write to %02X refused: writes not enabled (amp restarted?)", reg);
+      if (!handshake("a write was refused")) return false;
+    } else {
+      if (r) {
+        char h[100];
+        logEvent("write %02X %02X %02X %02X: unexpected answer %s", reg, a, b, c, toHex(h, sizeof h, body, r));
+      }
+      return false;
+    }
   }
   return false;
 }
@@ -261,8 +462,14 @@ bool writeReg(uint8_t reg, uint8_t a, uint8_t b, uint8_t c) {
 bool readLevels() {
   uint8_t body[16];
   size_t r = transact(0x2A, 0x04, nullptr, 0, body, sizeof body);
-  if (r < 6 || body[1] != 0x2A || body[2] != 0x04) return false;
+  if (r < 6 || body[1] != 0x2A || body[2] != 0x04) {
+    if (r) { char h[100]; logEvent("level read: unexpected answer %s", toHex(h, sizeof h, body, r)); }
+    return false;
+  }
   master = body[3]; sub = body[4];
+  // The two bytes after the levels have always been 00 00; anything else is new.
+  if (r >= 8 && (body[5] || body[6]))
+    logEvent("level read: bytes after the levels are %02X %02X, always 00 00 before", body[5], body[6]);
   io.printf("master=%u (0x%02X)  sub=%u (0x%02X)\r\n", master, master, sub, sub);
   return true;
 }
@@ -278,9 +485,128 @@ bool setLevel(uint8_t target, long v) {           // target 0 = master, 1 = sub
   (target ? sub : master) = (uint8_t)v; return true;
 }
 
+// ---- the knob's power-up handshake ---------------------------------------
+// Spec section 5, byte for byte and in the knob's order: seven reads, then the
+// write enable, with no pauses between them. The reads are not needed for
+// control, but they are what the real CONDUCTOR does every time the amp starts,
+// and the amp may treat a remote that has introduced itself this way differently,
+// e.g. in what PC-Tool offers for it.
+static const uint8_t HANDSHAKE_READS[] = {0x00, 0x03, 0x04, 0x05, 0x06, 0x07, 0x09};
+
+// Each register's reply is kept in flash, so a change - say after a PC-Tool
+// session - is logged with exactly which bytes moved. Register 04 is left out:
+// it holds the levels, which change all the time.
+void rememberRegister(uint8_t reg, const uint8_t *data, size_t n) {
+  char key[4], h[240];
+  h[0] = '\0';
+  snprintf(key, sizeof key, "r%02X", reg);
+  uint8_t old[96];
+  size_t oldN = prefs.getBytesLength(key);
+  if (oldN > sizeof old) oldN = 0;
+  if (oldN) prefs.getBytes(key, old, oldN);
+
+  if (!oldN) {
+    logEvent("reg %02X first seen (%u bytes): %s", reg, (unsigned)n, toHex(h, sizeof h, data, n));
+  } else if (oldN != n) {
+    logEvent("reg %02X CHANGED length %u -> %u: %s", reg, (unsigned)oldN, (unsigned)n, toHex(h, sizeof h, data, n));
+  } else if (memcmp(old, data, n)) {
+    // List only the bytes that moved: register 03 is 78 bytes long.
+    size_t at = 0;
+    for (size_t k = 0; k < n && at + 16 < sizeof h; k++)
+      if (old[k] != data[k]) at += snprintf(h + at, sizeof h - at, " [%u] %02X>%02X", (unsigned)k, old[k], data[k]);
+    logEvent("reg %02X CHANGED:%s", reg, h);
+  } else {
+    return;                                       // as before: nothing to say
+  }
+  prefs.putBytes(key, data, n);
+}
+
+bool handshake(const char *why) {
+  int answered = 0;
+  for (uint8_t reg : HANDSHAKE_READS) {
+    uint8_t body[100];                            // register 03's reply is 82 bytes
+    size_t r = transact(0x2A, reg, nullptr, 0, body, sizeof body);
+    if (r < 4 || body[1] != 0x2A || body[2] != reg) continue;
+    answered++;
+    const uint8_t *data = body + 3;               // between REG and CS
+    size_t n = r - 4;
+    if (reg == 0x04) { if (n >= 2) { master = data[0]; sub = data[1]; } }
+    else rememberRegister(reg, data, n);
+  }
+  bool enabled = enableWrites();
+  logEvent("handshake (%s): %d of %u reads answered, enable %s", why, answered,
+           (unsigned)sizeof HANDSHAKE_READS, enabled ? "accepted" : "NOT accepted");
+  return enabled;
+}
+
+// 'g N': read any register and print its data bytes, for exploring.
+bool readRegister(long reg) {
+  if (reg < 0 || reg > 0xFF) { io.print("REFUSED: register must be 0..255\r\n"); return false; }
+  uint8_t body[100]; char h[300];
+  size_t r = transact(0x2A, (uint8_t)reg, nullptr, 0, body, sizeof body);
+  if (r < 4 || body[1] != 0x2A || body[2] != (uint8_t)reg) return false;
+  io.printf("reg %02X: %s\r\n", (unsigned)reg, toHex(h, sizeof h, body + 3, r - 4));
+  return true;
+}
+
 bool setInput(long idx) {
   if (idx < 0 || idx > 2) { io.print("REFUSED: input must be 0, 1 or 2\r\n"); return false; }
   return writeReg(0x07, (uint8_t)idx, 0x01, 0x01);
+}
+
+// ---- watching the amp -----------------------------------------------------
+// The amp drives its TX line high whenever it is running (spec section 5: it
+// comes up a second before the knob does), so the line's idle level says whether
+// the amp is on, without sending anything. The RX pin is pulled down so that a
+// powered-off amp reads low instead of floating.
+static const uint32_t AMP_UP_MS   = 1000;        // the knob's delay after the amp
+static const uint32_t AMP_DOWN_MS = 200;         // a frame never holds the line low this long
+bool     ampUp = false;
+int      lineLevel = -1;
+uint32_t lineSince = 0;
+
+void watchAmpLine() {
+  int level = gpio_get_level((gpio_num_t)PIN_RX);
+  uint32_t now = millis();
+  if (level != lineLevel) { lineLevel = level; lineSince = now; return; }
+  if (!ampUp && level == 1 && now - lineSince >= AMP_UP_MS) {
+    ampUp = true;
+    logEvent("amp line up");
+    io.print("amp on\r\n");
+    handshake("amp came up");
+  } else if (ampUp && level == 0 && now - lineSince >= AMP_DOWN_MS) {
+    ampUp = false;
+    logEvent("amp line down");
+    io.print("amp off\r\n");
+  }
+}
+
+// Bytes arriving while no request is outstanding: the amp speaking unprompted,
+// which no capture has ever shown. Collected until the line has been quiet 5 ms.
+void watchUnsolicited() {
+  if (!scp.available()) return;
+  uint8_t b[96]; size_t n = 0; uint32_t last = millis();
+  while (millis() - last < 5) {
+    if (scp.available()) { int c = scp.read(); if (n < sizeof b) b[n++] = (uint8_t)c; last = millis(); }
+  }
+  // An amp switching off drops its TX line, which the UART can read as a stray
+  // 00 byte (a break). That is the power event, already logged, not a message.
+  bool zeros = true;
+  for (size_t k = 0; k < n; k++) if (b[k]) zeros = false;
+  if (zeros && gpio_get_level((gpio_num_t)PIN_RX) == 0) return;
+  char h[300];
+  logEvent("unsolicited from amp (%u bytes): %s", (unsigned)n, toHex(h, sizeof h, b, n));
+}
+
+// 't N': the phone's clock, so log lines carry a real date. Nothing before
+// 2023 is a plausible "now", which catches a phone sending milliseconds or junk.
+bool setClock(long epoch) {
+  if (epoch < 1672531200L) { io.print("REFUSED: need Unix time in seconds\r\n"); return false; }
+  bool first = !syncEpoch;
+  syncEpoch = (uint32_t)epoch;
+  syncMs = millis();
+  if (first) logEvent("clock set by the phone");   // ties this boot's uptime to a date
+  return true;
 }
 
 // ---- console -------------------------------------------------------------
@@ -313,12 +639,19 @@ void showDiag() {
   io.print("session "); printDuration(bleConnected ? now - connectedAtMs : lastSessionMs);
   io.print("   longest "); printDuration(longestSessionMs);
   io.printf("   heap %lu\r\n", (unsigned long)ESP.getFreeHeap());
+  io.printf("amp line %s   boot #%lu   log %u bytes%s   clock %s\r\n",
+            ampUp ? "up" : "down", (unsigned long)bootCount,
+            (unsigned)(fileSize(LOG_OLD) + fileSize(LOG_PATH)), logReady ? "" : " (flash unavailable)",
+            syncEpoch ? "set" : "not set");
 }
 
 void badNum() { io.print("REFUSED: need a number, e.g. 'm 30' or 'm 0x1E'\r\n"); }
 
 void handle(String line) {
   line.trim(); if (!line.length()) return;
+  // Whole-word commands first: 'log' would otherwise be read as 'l' + "og".
+  if (line == "log")       { dumpLog(); return; }
+  if (line == "log clear") { clearLog(); io.print("OK\r\n"); return; }
   char c = line[0];
   String arg = line.substring(1); arg.trim();
   long v = 0;
@@ -327,6 +660,9 @@ void handle(String line) {
   switch (c) {
     case 'r': ok = readLevels(); break;
     case 'e': ok = enableWrites(); break;
+    case 'h': ok = handshake("console"); break;
+    case 'g': if (!numOk) { badNum(); break; } ok = readRegister(v); break;
+    case 't': if (!numOk) { badNum(); break; } ok = setClock(v); break;
     case 'd': showDiag(); return;
     case 'v': if (!numOk) { badNum(); break; } verbose = (v != 0); ok = true; break;
     case 'm': if (!numOk) { badNum(); break; } ok = setLevel(0, v); break;
@@ -338,7 +674,8 @@ void handle(String line) {
     case '?':
       // The app parses the second line to learn the ceilings, so it stays in step
       // with this firmware instead of hardcoding them.
-      io.printf("r | e | m N | s N | i N | + | - | d | v 0/1  (N decimal, or 0x.. hex)\r\n"
+      io.printf("r | e | h | m N | s N | i N | + | - | g N | t N | log | log clear | d | v 0/1"
+                "  (N decimal, or 0x.. hex)\r\n"
                 "master 0..%u, sub 0..%u, input 0..2\r\n",
                 MAX_MASTER, MAX_SUB);
       return;
@@ -407,9 +744,18 @@ void setup() {
   while (!Serial && millis() - t0 < 3000) delay(10);
   delay(200);
 
+  prefs.begin("scp", false);
+  bootCount = prefs.getUInt("boots", 0) + 1;
+  prefs.putUInt("boots", bootCount);
+  logReady = LittleFS.begin(true);                 // formats the partition on first use
+  logEvent("boot: firmware v8, reset by %s%s", resetReason(), logReady ? "" : ", flash log unavailable");
+
   scp.begin(230400, SERIAL_8N1, PIN_RX, PIN_TX);
+  // Pull RX down, not up, so a powered-off amp reads low (see watchAmpLine).
+  gpio_pullup_dis((gpio_num_t)PIN_RX);
+  gpio_pulldown_en((gpio_num_t)PIN_RX);
   startBle();
-  Serial.printf("\r\nSCP bench v7 ready, advertising as \"%s\". '?' for help.\r\n", deviceName);
+  Serial.printf("\r\nSCP bench v8 ready, advertising as \"%s\". '?' for help.\r\n", deviceName);
   Serial.print("If you missed this banner, just type '?' - the console is live either way.\r\n");
 }
 
@@ -430,7 +776,11 @@ void loop() {
     else buf = "";                                 // non-printable: drop the line
   }
 
-  // 3. restart advertising after a disconnect
+  // 3. the amp: power state from its TX line, and anything it says unasked
+  watchAmpLine();
+  watchUnsolicited();
+
+  // 4. restart advertising after a disconnect
   if (needAdvertise) {
     needAdvertise = false;
     delay(200);                                    // let the stack tear the link down
@@ -438,7 +788,7 @@ void loop() {
     Serial.print("re-advertising\r\n");
   }
 
-  // 4. belt and braces: if we are neither connected nor advertising, nobody can
+  // 5. belt and braces: if we are neither connected nor advertising, nobody can
   //    ever reach us again. Cheap to check, and it recovers from a missed or
   //    failed re-arm without needing to know why it happened.
   static uint32_t lastAdvCheck = 0;

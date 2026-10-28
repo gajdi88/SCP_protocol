@@ -164,12 +164,61 @@ completely is refused, not read as zero.
 | `i N` | Select input `N` (0 main, 1 optical, 2 extension) |
 | `+` / `-` | Step master up / down by one, always re-reading the amp first |
 | `e` | Send the write-enable (register 01) |
-| `d` | BLE diagnostics: name, link state, connect/drop counts, session times, heap |
+| `h` | Replay the knob's power-up handshake: reads of 00, 03, 04, 05, 06, 07, 09, then the enable |
+| `g N` | Read register `N` and print its data bytes, for exploring |
+| `t N` | Set the log clock to Unix time `N` (seconds). An app sends this on connect |
+| `log` | Print the event log, between `LOG BEGIN <bytes>` and `LOG END` lines |
+| `log clear` | Erase the event log |
+| `d` | Diagnostics: BLE link state and counts, session times, heap, amp line state, boot number, log size |
 | `v 0` / `v 1` | Frame tracing off / on. An app sends `v 0`; default is on for USB work |
 | `?` | Help, including the current ceilings |
 
-Writes **auto-enable and retry once** on seeing the rejection frame, so `m` /
+Writes **handshake and retry once** on seeing the rejection frame, so `m` /
 `s` / `i` work without sending `e` by hand.
+
+### Behaving like the knob at amp power-up
+
+The real CONDUCTOR runs a fixed sequence every time the amp starts (spec §5):
+seven register reads, then the write-enable. The reads are not needed for
+control, but the amp may treat a remote that has introduced itself this way
+differently, for example in what PC-Tool shows for it. So the firmware now does
+the same, byte for byte and in the same order:
+
+- **When the amp comes up.** The amp drives its TX line (ATX) high while it runs,
+  so the firmware watches that line's idle level. Once it has been high for 1 s,
+  the knob's own delay in the power-up capture, the handshake runs. The ESP32's
+  RX pin is pulled down so that a switched-off amp reads low instead of floating.
+- **When a write is refused.** The amp forgets the enable when it restarts, so a
+  refusal means it restarted unnoticed; the full handshake replaces the bare
+  enable before the retry.
+- **On demand** with `h`.
+
+The console prints `amp on` / `amp off` when the line changes, which apps ignore.
+
+### Event log
+
+Anything unexpected is written to a log in the ESP32's flash, which survives
+power cuts and is fetched with `log`. Normal traffic is not logged, so the rare
+odd event is easy to find. What counts as unexpected:
+
+- the amp sending bytes nobody asked for (previously discarded unseen);
+- a missing, garbled or wrongly-checksummed reply, with the raw bytes received;
+- a refused write (the amp restarted) and a write echoed back wrongly;
+- the two bytes after the levels in register 04 being anything but `00 00`;
+- the amp's TX line going up or down, and every handshake's outcome;
+- a handshake register (00, 03, 05, 06, 07, 09) seen for the first time, or
+  different from last time. The last contents are kept in flash, so a change,
+  say after a PC-Tool session, is logged with exactly which bytes moved;
+- every ESP32 boot, with the reset reason (a brownout points at the supply).
+
+Each line starts `#<boot number> <uptime>`, plus the date and time once a phone
+has sent `t`. The same message repeated within a minute is collapsed into one
+line and a count. Two files of 64 KB are kept; the oldest is dropped when both
+are full. Log lines never contain `master=`, so an app reading levels from the
+console cannot mistake one for a reading.
+
+The flash log needs a partition for its file system. "Huge APP (3MB No OTA)",
+which the BLE stack already requires, includes one.
 
 Every transaction prints the transmitted frame (`TX`) and the decoded reply body
 (`RX`), so the console doubles as a protocol trace.
