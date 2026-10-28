@@ -65,6 +65,7 @@
   .inputs button:disabled { opacity:.4; }
   #status { font-size:12.5px; color:var(--dim); text-align:center; min-height:1.4em; margin-top:2px; }
   #status.err { color:#ff6b6b; }
+  #ver { font-size:11px; color:var(--dim); text-align:center; margin-top:18px; opacity:.7; }
   .hint { font-size:12px; color:var(--dim); margin-top:10px; }
   body.off .card { opacity:.5; }
 </style>
@@ -101,9 +102,13 @@
 </div>
 
 <div id="status">Not connected</div>
+<div id="ver"></div>
 
 <script>
 'use strict';
+// Bump on every change that gets published, so the phone can be checked against it.
+const APP_VERSION = '1.2.0 (2026-10-26)';
+
 // Nordic UART Service. Names are from the PERIPHERAL's point of view: the ESP32
 // receives on RX and notifies on TX, so we write to RX and subscribe to TX.
 const NUS = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
@@ -112,13 +117,15 @@ const TX  = '6e400003-b5a3-f393-e0a9-e50e24dcca9e';
 
 const $ = id => document.getElementById(id);
 const els = {
-  conn:$('conn'), dev:$('dev'), status:$('status'),
+  conn:$('conn'), dev:$('dev'), status:$('status'), ver:$('ver'),
   m:$('mslider'), s:$('sslider'), mval:$('mval'), sval:$('sval'), refresh:$('refresh'),
   buttons:[...document.querySelectorAll('.inputs button')],
 };
 
 let device = null, rxChar = null, connected = false;
 let wantConnected = false;                  // true = a drop should trigger a reconnect
+let userDisconnected = false;               // a tapped Disconnect holds off auto-connect
+let autoBusy = false;
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 function setStatus(msg, isErr) {
@@ -308,8 +315,85 @@ async function reconnect() {
       return;
     } catch (e) { /* try again */ }
   }
-  if (wantConnected) setStatus('Could not reconnect. Tap Connect.', true);
+  if (wantConnected) {
+    wantConnected = false;                   // let auto-connect on resume try again
+    setStatus('Could not reconnect. Tap Connect.', true);
+  }
 }
+
+// Listen for drops exactly once per device object: requestDevice() and
+// getDevices() can hand back the same object again.
+function attach(dev) {
+  if (device === dev) return;
+  device = dev;
+  dev.addEventListener('gattserverdisconnected', onDisconnected);
+}
+
+// ---- auto-connect -------------------------------------------------------
+// Only requestDevice() needs a tap and the chooser. Once the amp has been chosen
+// there, Chrome remembers the permission and getDevices() returns it on later
+// launches, and connecting to it needs no gesture. So the chooser is a one-time
+// pairing step and every launch after that connects by itself.
+const LAST_ID = 'scp.lastDeviceId';
+const canAuto = !!(navigator.bluetooth && navigator.bluetooth.getDevices);
+
+function remember(dev) { try { localStorage.setItem(LAST_ID, dev.id); } catch (e) {} }
+function lastId() { try { return localStorage.getItem(LAST_ID); } catch (e) { return null; } }
+
+// A remembered amp may be switched off or out of range. Where Chrome supports
+// it, wait for its advertisement rather than burning the connect retries on an
+// amp that is not there; without the API, just go ahead and try.
+function waitForAdvert(dev, ms) {
+  if (!dev.watchAdvertisements) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const ac = new AbortController();
+    let settled = false;
+    const done = err => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(t);
+      dev.removeEventListener('advertisementreceived', onAdv);
+      ac.abort();
+      err ? reject(err) : resolve();
+    };
+    const onAdv = () => done();
+    const t = setTimeout(() => done(new Error('Amp not found')), ms);
+    dev.addEventListener('advertisementreceived', onAdv);
+    dev.watchAdvertisements({ signal: ac.signal }).catch(() => done());
+  });
+}
+
+async function autoConnect() {
+  if (!canAuto || autoBusy || connected || wantConnected || userDisconnected) return;
+  autoBusy = true;
+  try {
+    // The page only ever asked for SCP- devices, so anything permitted is an amp.
+    // Prefer the one chosen last, in case an old board is still remembered.
+    const known = await navigator.bluetooth.getDevices();
+    if (!known.length) { setStatus('Tap Connect once to pair with the amp'); return; }
+    const dev = known.find(d => d.id === lastId()) || known[0];
+    attach(dev);
+    wantConnected = true;
+    els.conn.textContent = 'Cancel';
+    setStatus('Looking for ' + (dev.name || 'the amp') + '\u2026');
+    await waitForAdvert(dev, 15000);
+    if (!wantConnected) return;              // cancelled while waiting
+    await openSession(await connectGatt(dev));
+  } catch (e) {
+    rxChar = null;
+    wantConnected = false;
+    setConnected(false);
+    if (!userDisconnected) setStatus(e.message + '. Tap Connect.', true);
+  } finally {
+    autoBusy = false;
+  }
+}
+
+// Android often drops the link while the app is in the background or the screen
+// is locked, so try again whenever it comes back to the front.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible') autoConnect();
+});
 
 async function connect() {
   if (!navigator.bluetooth) {
@@ -318,11 +402,12 @@ async function connect() {
   }
   try {
     setStatus('Choose the amp…');
-    device = await navigator.bluetooth.requestDevice({
+    const dev = await navigator.bluetooth.requestDevice({
       filters: [{ namePrefix: 'SCP-' }],
       optionalServices: [NUS],
     });
-    device.addEventListener('gattserverdisconnected', onDisconnected);
+    attach(dev);
+    remember(dev);
 
     wantConnected = true;
     await openSession(await connectGatt(device));
@@ -337,14 +422,32 @@ async function connect() {
 els.conn.addEventListener('click', () => {
   if (connected || wantConnected) {
     wantConnected = false;                   // a deliberate disconnect must not reconnect
+    userDisconnected = true;                 // ...nor auto-connect on resume
     if (device && device.gatt.connected) device.gatt.disconnect();
     onDisconnected();
-  } else connect();
+  } else {
+    userDisconnected = false;
+    connect();
+  }
 });
 
 els.refresh.addEventListener('click', requestLevels);
 
+function showVersion(offline) {
+  els.ver.textContent = 'v' + APP_VERSION
+    + (offline ? ' \u00b7 saved for offline' : '')
+    + (canAuto ? '' : ' \u00b7 auto-connect unavailable in this browser');
+}
+showVersion(false);
+
+// Offline support, see sw.js. The version line confirms once this copy is saved.
+// Registration fails harmlessly where service workers are unavailable (file://).
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('sw.js').catch(() => {});
+  navigator.serviceWorker.ready.then(() => showVersion(true));
+}
 setConnected(false);
+autoConnect();
 </script>
 </body>
 </html>

@@ -13,6 +13,8 @@ no APK, no toolchain.
 3. Chrome menu → **Add to Home screen**. It then launches full screen with its
    own icon.
 4. Tap **Connect**, pick your `SCP-xxxx` board from Chrome's device chooser.
+   This is a one-time pairing step: from then on the app connects by itself
+   every time it starts.
 
 HTTPS is not optional: Web Bluetooth only runs in a secure context, so opening
 the file over `file://` will not work. GitHub Pages serves HTTPS, which is why
@@ -23,8 +25,47 @@ it is the easy route.
 - **Chrome on Android.** Firefox Android has no Web Bluetooth, and Safari/iOS
   never will.
 - **Location services on** — Chrome needs it to scan for BLE devices.
-- Chrome shows its device chooser on every connect. There is no silent
-  auto-reconnect; that is a deliberate browser privacy behaviour, not a bug here.
+- Chrome shows its device chooser whenever **Connect** is tapped; a page cannot
+  scan and pick a device on its own. Only the first connection needs it, though
+  (see Auto-connect below).
+
+## Auto-connect
+
+Once the amp has been chosen in the chooser, Chrome remembers the permission.
+On every later launch the app asks Chrome for the remembered amp
+(`navigator.bluetooth.getDevices()`), waits up to 15 s for it to advertise
+(`watchAdvertisements()`, where available), and connects without a tap. The amp
+picked most recently is preferred, in case an old board is still remembered.
+
+It also reconnects when the app comes back to the foreground, because Android
+often drops the link while the screen is locked. Tapping **Disconnect** holds
+that off until you tap **Connect** or relaunch the app.
+
+If this Chrome lacks `getDevices()`, the app behaves as before (tap Connect
+each time), and the version line at the bottom says
+"auto-connect unavailable in this browser".
+
+## Offline use
+
+Open the app once with an internet connection and it saves itself on the phone
+(a service worker, `sw.js`). After that it opens with no connection at all, and
+Bluetooth needs none. The version line at the bottom adds
+"saved for offline" once the copy is stored.
+
+Whenever the phone does have a connection, the app loads the latest published
+version and refreshes the saved copy, so updates still arrive by themselves. If
+the network does not answer within 3 s, the saved copy is used instead.
+
+Android can discard saved site data when storage runs very low or when Chrome's
+site data is cleared. Installing via **Add to Home screen** makes that much
+less likely. If it ever happens, open the app once while online.
+
+## Version
+
+The line at the bottom of the screen shows `APP_VERSION` from `index.html`.
+Bump it with every published change, so you can tell at a glance whether the
+phone has loaded the new build. GitHub Pages caches for about 10 minutes; if the
+old version persists, close the app fully and reopen it.
 
 ## How it talks to the amp
 
