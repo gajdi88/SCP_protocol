@@ -3,6 +3,7 @@ package io.github.gajdi88.scpremote;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.pm.PackageManager;
 import android.content.res.ColorStateList;
@@ -22,9 +23,15 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
 import android.widget.TextView;
+import android.widget.Toast;
 
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.Date;
 import java.util.List;
+import java.util.Locale;
 
 /**
  * The same controls as the web app: master volume, subwoofer level and input.
@@ -45,6 +52,11 @@ public class MainActivity extends Activity implements AmpService.Listener {
     Button down, up;
     final Button[] inputs = new Button[3];
     Button startStop, battery, forget;
+    Button startup, logButton;
+    TextView toolsNote;
+    String toolsMessage;        // the last download's outcome, shown until the next one
+    String pendingLog;          // downloaded, waiting for the user to save or share it
+    static final int SAVE_LOG = 2;
     boolean draggingVolume, draggingSub;
     boolean asked;      // ask for permissions once per launch, not on every resume
 
@@ -123,6 +135,22 @@ public class MainActivity extends Activity implements AmpService.Listener {
                 + "app last sent, not necessarily the amp's state.");
         inHint.setPadding(0, dp(10), 0, 0);
         in.addView(inHint);
+
+        // ---- amp tools
+        LinearLayout tools = card(root);
+        TextView toolsLabel = text(13, DIM);
+        toolsLabel.setText("AMP TOOLS");
+        toolsLabel.setPadding(0, 0, 0, dp(4));
+        tools.addView(toolsLabel);
+        startup = button("Re-run start-up sequence", v -> {
+            if (AmpService.instance != null) AmpService.instance.startupSequence();
+        });
+        tools.addView(startup, full());
+        logButton = button("Download log", v -> downloadLog());
+        tools.addView(logButton, full());
+        toolsNote = text(12, DIM);
+        toolsNote.setPadding(0, dp(10), 0, 0);
+        tools.addView(toolsNote);
 
         // ---- connection
         statusView = text(13, DIM);
@@ -247,6 +275,88 @@ public class MainActivity extends Activity implements AmpService.Listener {
         return pm != null && pm.isIgnoringBatteryOptimizations(getPackageName());
     }
 
+    // ---- event log ------------------------------------------------------------
+    void downloadLog() {
+        AmpService s = AmpService.instance;
+        if (s == null) return;
+        toolsMessage = null;
+        toolsNote.setText("Downloading the log\u2026");
+        s.downloadLog(new AmpService.LogListener() {
+            @Override public void onLogProgress(int got, int total) {
+                toolsNote.setText(total > 0
+                        ? "Downloading the log\u2026 " + Math.min(100, got * 100 / total) + "%"
+                        : "Downloading the log\u2026");
+            }
+            @Override public void onLogDone(String text) {
+                pendingLog = header() + text;
+                int lines = text.isEmpty() ? 0 : text.split("\n").length;
+                toolsMessage = "Log downloaded: " + lines + " lines.";
+                onStateChanged();
+                if (isFinishing() || isDestroyed()) return;
+                new AlertDialog.Builder(MainActivity.this)
+                        .setTitle("Log downloaded")
+                        .setMessage(lines + " lines from the ESP32. Save it as a file, or share it.")
+                        .setPositiveButton("Save to file", (d, w) -> saveLog())
+                        .setNeutralButton("Share", (d, w) -> shareLog())
+                        .setNegativeButton("Cancel", null)
+                        .show();
+            }
+            @Override public void onLogFailed(String why) {
+                toolsMessage = why + ". Try again.";
+                onStateChanged();
+            }
+        });
+        onStateChanged();
+    }
+
+    String header() {
+        AmpService s = AmpService.instance;
+        String board = s != null && s.deviceName() != null ? s.deviceName() : "?";
+        return "SCP event log from " + board + ", downloaded "
+                + new SimpleDateFormat("yyyy-MM-dd HH:mm:ss Z", Locale.US).format(new Date())
+                + " by SCP Remote v" + versionName() + "\n"
+                + "Lines: #<ESP32 boot> <time since that boot> [UTC time, once the phone set it]\n\n";
+    }
+
+    String fileName() {
+        return "scp-log-" + new SimpleDateFormat("yyyy-MM-dd-HHmm", Locale.US).format(new Date()) + ".txt";
+    }
+
+    // The system "save as" screen: no storage permission needed, and the user
+    // picks the place (Downloads, Drive, ...).
+    void saveLog() {
+        Intent i = new Intent(Intent.ACTION_CREATE_DOCUMENT)
+                .addCategory(Intent.CATEGORY_OPENABLE)
+                .setType("text/plain")
+                .putExtra(Intent.EXTRA_TITLE, fileName());
+        startActivityForResult(i, SAVE_LOG);
+    }
+
+    @Override protected void onActivityResult(int code, int result, Intent data) {
+        super.onActivityResult(code, result, data);
+        if (code != SAVE_LOG || result != RESULT_OK || data == null || data.getData() == null
+                || pendingLog == null) return;
+        try (OutputStream out = getContentResolver().openOutputStream(data.getData())) {
+            out.write(pendingLog.getBytes(StandardCharsets.UTF_8));
+            Toast.makeText(this, "Log saved", Toast.LENGTH_SHORT).show();
+        } catch (Exception e) {
+            Toast.makeText(this, "Could not save: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    void shareLog() {
+        Intent i = new Intent(Intent.ACTION_SEND)
+                .setType("text/plain")
+                .putExtra(Intent.EXTRA_SUBJECT, fileName())
+                .putExtra(Intent.EXTRA_TEXT, pendingLog);
+        try {
+            startActivity(Intent.createChooser(i, "Share the log"));
+        } catch (RuntimeException e) {
+            // A very large log can exceed what Android passes between apps.
+            Toast.makeText(this, "Too large to share; use Save to file", Toast.LENGTH_LONG).show();
+        }
+    }
+
     // ---- display ------------------------------------------------------------
     @Override public void onStateChanged() {
         AmpService s = AmpService.instance;
@@ -258,6 +368,22 @@ public class MainActivity extends Activity implements AmpService.Listener {
         for (View v : new View[]{volumeBar, subBar, down, up, inputs[0], inputs[1], inputs[2]}) {
             v.setEnabled(live);
             v.setAlpha(live ? 1f : 0.4f);
+        }
+        // The tools need only the Bluetooth link, not a level reading: the start-up
+        // sequence is for exactly the case where the amp is not answering.
+        boolean tooled = running && s.ready && s.supportsLog;
+        boolean busy = running && (s.logPending || s.wantLog);
+        startup.setEnabled(tooled && !busy);
+        startup.setAlpha(tooled && !busy ? 1f : 0.4f);
+        logButton.setEnabled(tooled && !busy);
+        logButton.setAlpha(tooled && !busy ? 1f : 0.4f);
+        if (!busy) {
+            toolsNote.setText(running && s.ready && !s.supportsLog
+                    ? "These need ESP32 firmware v8 or later."
+                    : toolsMessage != null ? toolsMessage
+                    : "The start-up sequence is what the CONDUCTOR knob sends when the amp "
+                    + "switches on. The ESP32 sends it by itself; use this if the amp stays "
+                    + "silent anyway.");
         }
 
         String name = running ? s.deviceName() : null;

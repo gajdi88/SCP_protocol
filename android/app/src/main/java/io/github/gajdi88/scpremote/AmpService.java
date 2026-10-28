@@ -102,6 +102,22 @@ public class AmpService extends Service {
     int subConfirmed = -1, subDesired = -1, subSent;
     // The amp does not report its input, so this is what the app last asked for.
     int inputWanted = -1, inputDone = -1, inputSent;
+
+    // Firmware v8 and later: start-up sequence ('h'), event log ('log'), clock ('t').
+    // Recognised from its help line, so older firmware keeps working without them.
+    boolean supportsLog;
+    boolean clockSent;
+    boolean wantHandshake, wantLog, logPending;
+    StringBuilder logText;
+    int logTotal;
+    LogListener logListener;
+
+    /** Progress and result of a log download, on the main thread. */
+    interface LogListener {
+        void onLogProgress(int got, int total);
+        void onLogDone(String text);
+        void onLogFailed(String why);
+    }
     int retry;
     boolean scanning;
 
@@ -209,6 +225,27 @@ public class AmpService extends Service {
         if (!known || i < 0 || i > 2) return;
         inputWanted = i;
         notifyUi();
+        pump();
+    }
+
+    /**
+     * Ask the ESP32 to replay the knob's power-up sequence. It does this by itself
+     * when the amp comes up and when a write is refused; this is for the case where
+     * neither happened and the amp still is not answering. Allowed while the levels
+     * are unknown, which is exactly when it is needed.
+     */
+    void startupSequence() {
+        if (!ready || !supportsLog) return;
+        wantHandshake = true;
+        setStatus("Sending the start-up sequence\u2026");
+        pump();
+    }
+
+    /** Fetch the ESP32's event log; the listener gets progress and the text. */
+    void downloadLog(LogListener l) {
+        if (!ready || !supportsLog || logPending || wantLog) return;
+        logListener = l;
+        wantLog = true;
         pump();
     }
 
@@ -323,6 +360,9 @@ public class AmpService extends Service {
         lineBuf.setLength(0);
         main.removeCallbacks(replyTimeout);
         main.removeCallbacks(retryRead);
+        if (logPending) finishLog(null, "The connection dropped during the download");
+        wantHandshake = false;
+        wantLog = false;
         if (gatt != null) { gatt.disconnect(); gatt.close(); gatt = null; }
         // Hand the volume buttons back to the phone while there is no amp to drive.
         if (session != null) session.setActive(false);
@@ -405,6 +445,7 @@ public class AmpService extends Service {
     void onLinkReady() {
         ready = true;
         retry = 0;
+        clockSent = false;
         setStatus("Reading the amp…");
         send("v 0", 'v');   // quiet mode: one line per command instead of four
         sendRaw("?");       // learn this firmware's ceiling; answered without OK
@@ -458,8 +499,19 @@ public class AmpService extends Service {
 
     /** Send whatever is next: a read if one is due, else the newest wanted settings. */
     void pump() {
-        if (!ready || !owed.isEmpty()) return;
-        if (needRead) {
+        // While the ESP32 streams its log it runs nothing else, so hold everything.
+        if (!ready || !owed.isEmpty() || logPending) return;
+        if (wantHandshake) {
+            wantHandshake = false;
+            send("h", 'h');
+        } else if (wantLog) {
+            wantLog = false;
+            logPending = true;
+            logText = new StringBuilder();
+            logTotal = -1;
+            sendRaw("log");                    // answered by LOG BEGIN ... LOG END, not OK
+            main.postDelayed(logStall, LOG_STALL_MS);
+        } else if (needRead) {
             needRead = false;
             send("r", 'r');
         } else if (!known) {
@@ -496,7 +548,70 @@ public class AmpService extends Service {
         return -1;
     }
 
+    // ---- log download ---------------------------------------------------------
+    static final long LOG_STALL_MS = 15000;      // no line for this long: give up
+
+    final Runnable logStall = () -> finishLog(null, "The log download stalled");
+
+    /** Lines between LOG BEGIN and LOG END are the log, never protocol replies. */
+    boolean onLogLine(String line) {
+        if (line.startsWith("LOG BEGIN")) {
+            try { logTotal = Integer.parseInt(line.substring(9).trim()); }
+            catch (NumberFormatException e) { logTotal = 0; }
+        } else if (line.equals("LOG END")) {
+            finishLog(logText.toString(), null);
+            return true;
+        } else if (logTotal >= 0) {
+            logText.append(line).append('\n');
+        } else {
+            return false;                       // not started yet: an ordinary reply
+        }
+        main.removeCallbacks(logStall);
+        main.postDelayed(logStall, LOG_STALL_MS);
+        if (logListener != null) logListener.onLogProgress(logText.length(), logTotal);
+        return true;
+    }
+
+    void finishLog(String text, String why) {
+        logPending = false;
+        main.removeCallbacks(logStall);
+        LogListener l = logListener;
+        logListener = null;
+        if (l != null) {
+            if (text != null) l.onLogDone(text);
+            else l.onLogFailed(why);
+        }
+        pump();
+    }
+
     void onLine(String line) {
+        if (logPending && onLogLine(line)) return;
+
+        // The help line names the commands this firmware has. "log" means v8 or
+        // later, which also takes the phone's clock for its log timestamps.
+        if (line.startsWith("r | e")) {
+            supportsLog = line.contains("log");
+            if (supportsLog && !clockSent) {
+                clockSent = true;
+                send("t " + System.currentTimeMillis() / 1000, 't');
+            }
+            notifyUi();
+            return;
+        }
+
+        // The ESP32 watches the amp's TX line and says when it changes. After a
+        // start the levels may differ from before, so read them again.
+        if (line.equals("amp on")) {
+            setStatus("Amp switched on, reading it\u2026");
+            if (!owed.contains('r')) needRead = true;
+            pump();
+            return;
+        }
+        if (line.equals("amp off")) {
+            setStatus("The amp is off or asleep");
+            return;
+        }
+
         // "master 0..60, sub 0..23, input 0..2"
         Matcher m = CEILING.matcher(line);
         if (m.find()) {
@@ -553,6 +668,15 @@ public class AmpService extends Service {
             } else if (kind != null && kind == 'r' && !ok) {
                 pendingSteps = 0;
                 setStatus("The amp did not answer a level read");
+                // Without a first reading the controls stay disabled, so keep asking
+                // rather than leave the app stuck until it is restarted.
+                if (!known) {
+                    main.removeCallbacks(retryRead);
+                    main.postDelayed(retryRead, 3000);
+                }
+            } else if (kind != null && kind == 'h') {
+                setStatus(ok ? "Start-up sequence done" : "The amp did not accept the start-up sequence");
+                if (!owed.contains('r')) needRead = true;
             }
             showVolume();
             pump();
