@@ -9,13 +9,22 @@ QueueHandle_t xQueueCreate(int,int e){ QueueDef*d=new QueueDef(); d->esz=e; retu
 int xQueueSend(QueueHandle_t h,const void*i,int){ QueueDef*d=(QueueDef*)h;
   d->q.push_back(std::vector<char>((const char*)i,(const char*)i+d->esz)); return pdTRUE; }
 int xQueueReceive(QueueHandle_t h,void*o,int){ QueueDef*d=(QueueDef*)h;
-  if(d->q.empty()) return 0; memcpy(o,&d->q.front()[0],d->esz); d->q.pop_front(); return pdTRUE; }
+  if(d->q.empty()) return 0;
+  memcpy(o,&d->q.front()[0],d->esz); d->q.pop_front(); return pdTRUE; }
 
 BLECharacteristicCallbacks *g_rxcb = nullptr;
 void BLECharacteristic::setCallbacks(BLECharacteristicCallbacks*c){ g_rxcb = c; }
 void BLECharacteristic::notify(){ g_seq.push_back("notify"); g_notifies.push_back(val); }
 
 #include "../scp_bench/scp_bench.ino"
+
+// Both log files, oldest first, without creating either.
+static std::string logText(){
+  std::string s;
+  const char *files[2] = {"/log.old", "/log.txt"};
+  for (int i = 0; i < 2; i++) if (g_fs.files.count(files[i])) s += g_fs.files[files[i]];
+  return s;
+}
 
 static std::string notifyText(){
   std::string s; for(size_t i=0;i<g_notifies.size();i++) s += g_notifies[i];
@@ -139,6 +148,119 @@ int main(){
   for(int i=0;i<200;i++) amp.rx.push_back((uint8_t)(i*7+3));   // a floating RX pin
   handle(String("r"));
   ck(has(usb(),"no valid reply"), "line noise is never mistaken for a reply");
+
+  // ---- firmware v8: the knob's handshake, the amp line, the event log ----
+  amp.present = true; amp.rx.clear(); bleConnected = false;
+  handle(String("v 1")); usb();
+
+  section("the knob's power-up handshake, byte for byte");
+  amp.powerCycle(); g_tx.clear(); handle(String("h")); o = usb();
+  ck(hexs(g_tx) == hexs(hexv(
+       "42 03 FC 01 2A 00 2A  42 03 FC 01 2A 03 2D  42 03 FC 01 2A 04 2E"
+       "42 03 FC 01 2A 05 2F  42 03 FC 01 2A 06 30  42 03 FC 01 2A 07 31"
+       "42 03 FC 01 2A 09 33  42 05 FA 01 2B 01 01 01 2E")),
+     "h: the seven reads, then the enable, as in spec 5");
+  ck(amp.enabled && has(o,"OK"), "and the amp's writes end up enabled");
+  handle(String("g 0")); ck(has(usb(),"reg 00: 01 03"), "g 0 reads register 00 (01 03)");
+
+  section("a refused write runs the whole handshake, then retries");
+  amp.powerCycle(); g_tx.clear(); handle(String("m 22")); o = usb();
+  std::string tx = hexs(g_tx), wr = "42 06 F9 01 2B 04 00 16 01 46";
+  ck(tx.find(wr) == 0 && tx.rfind(wr) == tx.size() - wr.size(),
+     "the write is sent, refused, then sent again last");
+  ck(has(tx,"42 03 FC 01 2A 03 2D") && has(tx,"42 05 FA 01 2B 01 01 01 2E"),
+     "with the full handshake in between, not a bare enable");
+  ck(has(o,"OK") && amp.master == 22, "and the write lands");
+
+  section("the amp's TX line: power-up and power-down");
+  ck(g_pullDown[PIN_RX], "RX is pulled down, so an amp that is off reads low");
+  usb(); g_tx.clear(); amp.powerCycle();
+  g_gpioLevel[PIN_RX] = 1; loop(); delay(500); loop();
+  ck(g_tx.empty() && !ampUp, "nothing is sent while the line has been up under 1 s");
+  delay(600); loop(); o = usb(); tx = hexs(g_tx);
+  ck(ampUp && has(o,"amp on"), "after 1 s high the amp counts as on");
+  ck(tx.find("42 03 FC 01 2A 00 2A") == 0 && has(tx,"42 05 FA 01 2B 01 01 01 2E") && amp.enabled,
+     "and the handshake goes out unasked, as the knob's would");
+  g_tx.clear(); delay(5000); loop();
+  ck(g_tx.empty(), "once per power-up, not repeatedly");
+  g_gpioLevel[PIN_RX] = 0; loop(); delay(100); loop();
+  ck(ampUp, "a brief low (a frame) is not mistaken for power-off");
+  delay(150); loop(); o = usb();
+  ck(!ampUp && has(o,"amp off"), "200 ms low: the amp counts as off");
+
+  section("the event log");
+  clearLog(); usb();
+  amp.present = false;
+  handle(String("r")); handle(String("r")); handle(String("r"));
+  amp.present = true;
+  usb(); handle(String("log")); o = usb();
+  size_t b0 = o.find("LOG BEGIN "), e0 = o.find("LOG END\r\n");
+  ck(b0 != std::string::npos && e0 != std::string::npos && b0 < e0, "log is framed by LOG BEGIN / LOG END");
+  std::string body = o.substr(o.find("\r\n", b0) + 2, e0 - o.find("\r\n", b0) - 2);
+  ck(has(body,"log cleared"), "log clear leaves a line saying so");
+  ck(has(body,"no valid reply (silence) to 42 03 FC 01 2A 04 2E, received: nothing"),
+     "a silent amp is logged with the request it ignored");
+  ck(has(body,"(previous line repeated 2 more times)"), "repeats collapse into one line and a count");
+  bool hashes = true;
+  for (size_t i = 0; i < body.size(); i = body.find("\r\n", i) + 2) {
+    if (body[i] != '#') hashes = false;
+    if (body.find("\r\n", i) == std::string::npos) break;
+  }
+  ck(hashes, "every log line starts with #");
+  ck(!has(body,"master="), "no log line can be mistaken for a level reading");
+  ck(!has(o.substr(e0),"OK"), "the dump ends at LOG END, with no OK after it");
+  ck(atoi(o.c_str() + b0 + 10) == (int)logText().size(), "LOG BEGIN gives the true size in bytes");
+  ck(has(g_fs.files["/log.txt"],"no valid reply"), "and it is all in flash, not only in memory");
+
+  section("unexpected things the amp does");
+  clearLog();
+  amp.feed(hexv("43 05 FA 01 2B 04 00 10 01")); loop();
+  ck(has(logText(),"unsolicited from amp (9 bytes): 43 05 FA 01 2B 04 00 10 01"),
+     "bytes the amp sends unasked are logged");
+  amp.feed(hexv("00")); loop();
+  ck(!has(logText(),"(1 bytes)"), "a lone 00 with the line low (amp switching off) is not");
+  amp.feed(hexv("AA BB")); handle(String("r"));
+  ck(has(logText(),"unsolicited bytes before a request: AA BB"),
+     "bytes waiting before a request are logged, no longer discarded");
+  amp.tail04[0] = 0x01; handle(String("r")); amp.tail04[0] = 0x00;
+  ck(has(logText(),"bytes after the levels are 01 00"), "new data in register 04's tail is logged");
+  amp.powerCycle(); handle(String("m 23"));
+  ck(has(logText(),"write to 04 refused") && has(logText(),"handshake (a write was refused)"),
+     "a refused write and the handshake it caused are logged");
+
+  section("handshake registers are remembered between boots");
+  clearLog(); handle(String("h"));
+  ck(!has(logText(),"reg 03"), "an unchanged register is not logged again");
+  ck(!has(logText(),"reg 04"), "register 04 (the levels) is never tracked");
+  amp.reg03[20] = 0x3D; handle(String("h"));
+  ck(has(logText(),"reg 03 CHANGED: [20] 3C>3D"), "a changed byte is logged as [offset] old>new");
+  amp.reg03[20] = 0x3C; g_nvs.erase("r03"); clearLog(); handle(String("h"));
+  ck(has(logText(),"reg 03 first seen (78 bytes): 02 00 88 13"), "a register never seen before is logged in full");
+
+  section("the log clock");
+  usb(); handle(String("t 5")); ck(has(usb(),"REFUSED"), "t 5 refused: not a plausible Unix time");
+  handle(String("t 1761650000")); ck(has(usb(),"OK"), "t takes Unix time from the phone");
+  clearLog(); ck(has(logText()," 2025-10-28T11:13:2"), "log lines then carry the date and time");
+  handle(String("?")); ck(has(usb(),"| log |"), "? lists log, which is how an app spots v8");
+
+  section("the log stays bounded");
+  clearLog();
+  for (int i = 0; i < 3000; i++) logEvent("filler event number %d, padded out to a realistic length", i);
+  ck(fileSize(LOG_OLD) > 0, "a full log rolls over into the old file");
+  ck(fileSize(LOG_PATH) <= LOG_MAX + MSG_MAX + 64 && fileSize(LOG_OLD) <= LOG_MAX + MSG_MAX + 64,
+     "neither file grows past its cap");
+  ck(has(logText(),"number 2999"), "the newest events are kept");
+
+  section("boots and resets are logged");
+  clearLog(); g_resetReason = ESP_RST_BROWNOUT;
+  uint32_t boots = bootCount; setup(); usb();
+  ck(bootCount == boots + 1, "the boot counter survives a reboot (kept in NVS)");
+  ck(has(logText(),"boot: firmware v8, reset by brownout"), "the reset reason is logged");
+  g_fs.files.clear(); g_fs.mountOk = false; setup(); usb();
+  handle(String("log")); o = usb();
+  ck(has(o,"LOG BEGIN 0") && has(o,"LOG END"), "with no flash, log still answers, empty");
+  handle(String("d")); ck(has(usb(),"(flash unavailable)"), "and d says why");
+  handle(String("r")); ck(has(usb(),"OK"), "control keeps working without the log");
 
   return report();
 }

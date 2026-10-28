@@ -1,16 +1,27 @@
 name: Firmware
 
-# Compiles scp_bench for both supported boards, so a firmware change is known to
-# build before anyone flashes it. Nothing is uploaded or published.
+# Runs the host test suite (test/run.sh) and compiles scp_bench for both
+# supported boards, so a firmware change is known to behave and to build before
+# anyone flashes it. Nothing is uploaded or published.
 on:
   push:
     branches: [main]
-    paths: ['scp_bench/**', '.github/workflows/firmware.yml']
+    paths: ['scp_bench/**', 'amp_sim/**', 'app/**', 'test/**', '.github/workflows/firmware.yml']
   pull_request:
-    paths: ['scp_bench/**', '.github/workflows/firmware.yml']
+    paths: ['scp_bench/**', 'amp_sim/**', 'app/**', 'test/**', '.github/workflows/firmware.yml']
   workflow_dispatch:
 
 jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Run test/run.sh
+        run: ./test/run.sh
+
   compile:
     runs-on: ubuntu-latest
     strategy:

@@ -12,9 +12,12 @@ std::vector<std::string> g_seq, g_notifies;
 int g_advCalls = 0;
 
 // millis() always advances, so no wait loop in a sketch can spin forever here.
-static unsigned long g_ms = 0;
-unsigned long millis(){ return ++g_ms; }
-void delay(unsigned long m){ g_ms += m; }
+// It moves a quarter of a millisecond per call: fine-grained enough that reading
+// register 03's 85-byte reply byte by byte fits the sketch's 50 ms reply timeout,
+// as it does on the real UART (about 4 ms at 230400 baud).
+static unsigned long g_us = 0;
+unsigned long millis(){ g_us += 250; return g_us / 1000; }
+void delay(unsigned long m){ g_us += m * 1000; }
 void delayMicroseconds(unsigned long){}
 
 // ---- assertions ----
