@@ -15,7 +15,7 @@ master volume, subwoofer level and input selection — and, as of 19 Sep 2026,
 | [`conductor-scp-protocol.md`](conductor-scp-protocol.md) | The protocol specification: physical layer, framing, checksum, registers, write-enable, power-up handshake, open questions | Framing, checksum, level, input-select and write-enable **confirmed on hardware**; boot register meanings partly guessed |
 | [`scp_bench/scp_bench.ino`](scp_bench/scp_bench.ino) | Arduino sketch: ESP32 acts as the knob, driven from an identical console over **USB serial and BLE** | **Working against a real amp.** Read, write-enable, master, sub and input all verified |
 | [`app/`](app/) | Single-screen Web Bluetooth dashboard for Android: volume, sub and input | **Working.** Served from GitHub Pages, added to the home screen as a PWA |
-| [`test/`](test/) | Host tests: compiles both sketches against a stubbed ESP32 and a simulated amp. `./test/run.sh`, about a second, no hardware | 112 C++ checks plus 20 JavaScript; run on every relevant change by the Firmware workflow |
+| [`test/`](test/) | Host tests: compiles both sketches against a stubbed ESP32 and a simulated amp. `./test/run.sh`, about a second, no hardware | 114 C++ checks plus 20 JavaScript; run on every relevant change by the Firmware workflow |
 | [`amp_sim/`](amp_sim/) | A second ESP32 that pretends to be the amplifier, for testing changes with no amp and no speakers | **Conformance-tested** against every captured frame in the spec |
 | [`usb_hello/usb_hello.ino`](usb_hello/usb_hello.ino) | Isolation test: USB console only, no BLE or UART. Proves a board can print and receive before anything else is debugged | Diagnostic tool |
 | [`ble_echo/ble_echo.ino`](ble_echo/ble_echo.ino) | Stage 0 BLE bring-up test: Nordic UART Service echo, no SCP involvement | Written, logic unit-tested; **not yet flashed** |
@@ -185,16 +185,31 @@ control, but the amp may treat a remote that has introduced itself this way
 differently, for example in what PC-Tool shows for it. So the firmware now does
 the same, byte for byte and in the same order:
 
-- **When the amp comes up.** The amp drives its TX line (ATX) high while it runs,
-  so the firmware watches that line's idle level. Once it has been high for 1 s,
-  the knob's own delay in the power-up capture, the handshake runs. The ESP32's
-  RX pin is pulled down so that a switched-off amp reads low instead of floating.
+- **When the amp starts answering after silence.** That is taken as the amp
+  having come up, and the handshake follows as soon as the current command is
+  done. Three unanswered requests in a row count as the amp having gone.
 - **When a write is refused.** The amp forgets the enable when it restarts, so a
   refusal means it restarted unnoticed; the full handshake replaces the bare
   enable before the retry.
 - **On demand** with `h`.
 
-The console prints `amp on` / `amp off` when the line changes, which apps ignore.
+The console prints `amp on` / `amp off` when that changes. The web app ignores
+these lines; the Android app re-reads the levels on `amp on`.
+
+**The ESP32's RX pin must be pulled up.** Firmware v8 pulled it down instead,
+to read the amp's power state from the line's idle level, and the amp then went
+completely silent: not one byte in four boots, and the line never read high
+(event log, 28 Oct 2026). The amp evidently does not drive its TX line high on
+its own; the knob provides the pull-up, and so does the ESP32's UART driver by
+default. v8.1 restores the pull-up and judges the amp by whether it answers.
+The internal pull-up is weak (about 45 kΩ). If replies are ever garbled, a
+10 kΩ resistor from the ESP32's 3.3 V to its RX pin makes it as firm as the
+knob's.
+
+Because the ESP32 only sends when asked, with no app connected nothing tells
+it the amp has come up, so the handshake waits for the first command. Sensing
+the amp's 3.3 V pin with a spare GPIO would let it run at power-up without
+any polling; that is not wired or implemented.
 
 ### Event log
 

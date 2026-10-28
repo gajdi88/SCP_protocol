@@ -172,21 +172,31 @@ int main(){
      "with the full handshake in between, not a bare enable");
   ck(has(o,"OK") && amp.master == 22, "and the write lands");
 
-  section("the amp's TX line: power-up and power-down");
-  ck(g_pullDown[PIN_RX], "RX is pulled down, so an amp that is off reads low");
-  usb(); g_tx.clear(); amp.powerCycle();
-  g_gpioLevel[PIN_RX] = 1; loop(); delay(500); loop();
-  ck(g_tx.empty() && !ampUp, "nothing is sent while the line has been up under 1 s");
-  delay(600); loop(); o = usb(); tx = hexs(g_tx);
-  ck(ampUp && has(o,"amp on"), "after 1 s high the amp counts as on");
+  section("the amp going away and coming back (v8.1)");
+  // v8 pulled RX down and the real amp fell silent: its TX line needs a pull-up.
+  ck(g_pullUp[PIN_RX] && !g_pullDown[PIN_RX], "RX is pulled up, not down");
+  handle(String("r")); usb();
+  ck(ampAnswering, "an answering amp counts as there");
+  amp.present = false; amp.powerCycle();
+  handle(String("r")); handle(String("r")); o = usb();
+  ck(ampAnswering && !has(o,"amp off"), "two silent requests are not enough to count it gone");
+  handle(String("r")); o = usb();
+  ck(!ampAnswering && has(o,"amp off"), "the third in a row is");
+  amp.present = true; g_tx.clear();
+  handle(String("r")); o = usb();
+  ck(has(o,"amp on") && has(o,"master="), "its first answer after that says amp on, and the read succeeds");
+  ck(handshakeDue && !amp.enabled, "the handshake is due, not yet sent mid-command");
+  g_tx.clear(); loop(); tx = hexs(g_tx);
   ck(tx.find("42 03 FC 01 2A 00 2A") == 0 && has(tx,"42 05 FA 01 2B 01 01 01 2E") && amp.enabled,
-     "and the handshake goes out unasked, as the knob's would");
-  g_tx.clear(); delay(5000); loop();
-  ck(g_tx.empty(), "once per power-up, not repeatedly");
-  g_gpioLevel[PIN_RX] = 0; loop(); delay(100); loop();
-  ck(ampUp, "a brief low (a frame) is not mistaken for power-off");
-  delay(150); loop(); o = usb();
-  ck(!ampUp && has(o,"amp off"), "200 ms low: the amp counts as off");
+     "loop() then sends the knob's handshake unasked");
+  g_tx.clear(); loop(); delay(5000); loop();
+  ck(g_tx.empty() && !handshakeDue, "once per return, not repeatedly");
+  amp.present = false; amp.powerCycle(); usb();
+  handle(String("r")); handle(String("r")); handle(String("r"));
+  amp.present = true; handle(String("m 21")); o = usb();
+  ck(has(o,"amp on") && has(o,"OK") && amp.master == 21,
+     "a write as the first command after silence also recovers");
+  ck(!handshakeDue, "and its refusal's handshake counts, so none is left pending");
 
   section("the event log");
   clearLog(); usb();
@@ -217,8 +227,6 @@ int main(){
   amp.feed(hexv("43 05 FA 01 2B 04 00 10 01")); loop();
   ck(has(logText(),"unsolicited from amp (9 bytes): 43 05 FA 01 2B 04 00 10 01"),
      "bytes the amp sends unasked are logged");
-  amp.feed(hexv("00")); loop();
-  ck(!has(logText(),"(1 bytes)"), "a lone 00 with the line low (amp switching off) is not");
   amp.feed(hexv("AA BB")); handle(String("r"));
   ck(has(logText(),"unsolicited bytes before a request: AA BB"),
      "bytes waiting before a request are logged, no longer discarded");
@@ -255,7 +263,7 @@ int main(){
   clearLog(); g_resetReason = ESP_RST_BROWNOUT;
   uint32_t boots = bootCount; setup(); usb();
   ck(bootCount == boots + 1, "the boot counter survives a reboot (kept in NVS)");
-  ck(has(logText(),"boot: firmware v8, reset by brownout"), "the reset reason is logged");
+  ck(has(logText(),"boot: firmware v8.1, reset by brownout"), "the reset reason is logged");
   g_fs.files.clear(); g_fs.mountOk = false; setup(); usb();
   handle(String("log")); o = usb();
   ck(has(o,"LOG BEGIN 0") && has(o,"LOG END"), "with no flash, log still answers, empty");
