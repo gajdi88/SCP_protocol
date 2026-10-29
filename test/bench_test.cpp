@@ -249,7 +249,10 @@ int main(){
   usb(); handle(String("t 5")); ck(has(usb(),"REFUSED"), "t 5 refused: not a plausible Unix time");
   handle(String("t 1761650000")); ck(has(usb(),"OK"), "t takes Unix time from the phone");
   clearLog(); ck(has(logText()," 2025-10-28T11:13:2"), "log lines then carry the date and time");
-  handle(String("?")); ck(has(usb(),"| log |"), "? lists log, which is how an app spots v8");
+  handle(String("?")); o = usb();
+  ck(has(o,"| log |"), "? lists log, which is how an app spots v8 and later");
+  ck(has(o,"\r\nfirmware v8.2\r\n"), "? reports the firmware version on its own line");
+  handle(String("d")); ck(has(usb(),"firmware v8.2   name SCP-"), "d reports it too");
 
   section("the log stays bounded");
   clearLog();
@@ -263,7 +266,7 @@ int main(){
   clearLog(); g_resetReason = ESP_RST_BROWNOUT;
   uint32_t boots = bootCount; setup(); usb();
   ck(bootCount == boots + 1, "the boot counter survives a reboot (kept in NVS)");
-  ck(has(logText(),"boot: firmware v8.1, reset by brownout"), "the reset reason is logged");
+  ck(has(logText(),"boot: firmware v8.2, reset by brownout"), "the reset reason and version are logged");
   g_fs.files.clear(); g_fs.mountOk = false; setup(); usb();
   handle(String("log")); o = usb();
   ck(has(o,"LOG BEGIN 0") && has(o,"LOG END"), "with no flash, log still answers, empty");

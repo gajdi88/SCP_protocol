@@ -230,6 +230,7 @@ The earlier "input selection does nothing" puzzle was an operating error, not a 
 | Is there a separate digital-input volume target (`02`?) in register 04 | Enable "Digital volume" as a CONDUCTOR volume menu in PC-Tool and capture |
 | Does the amp ever speak unprompted (mute, preset change from PC-Tool, error)? | Long capture while changing things in PC-Tool |
 | Knob hot-plugged into a running amp: same handshake? | Capture it |
+| Does the knob's handshake wake the amp from standby? | **Observed 29 Oct 2026:** with firmware v8 (which could not hear replies, but could still transmit), re-running the handshake from the app made an amp with no sound start playing. Repeat with v8.1, and with the enable alone, to find which frame does it |
 | Meaning of the constant `01` after ~LEN and the trailing `01` in level writes | Probably only resolvable by experiment |
 | Earlier DMM reading of ~0 V idle on both data lines contradicts idle-high on the analyser | **Probably explained** (28 Oct 2026): with the ESP32's RX pin pulled *down*, the amp went entirely silent and the line never read high. So the amp most likely does not drive its TX high itself; the knob, or a pull-up, does. That fits ~0 V on a DMM with nothing pulling the line up, and idle-high on the analyser with the knob attached. Confirm by measuring ATX with only a 10 kΩ pull-up attached |
 

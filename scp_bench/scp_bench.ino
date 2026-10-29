@@ -39,6 +39,9 @@
 // BEFORE UPLOADING: Tools -> Partition Scheme -> "Huge APP (3MB No OTA)".
 // The BLE stack is ~1.3 MB; the default scheme gives the app only 1.2 MB.
 //
+// v8.2: reports its own version, in '?' and 'd', so an app can show which
+// firmware it is talking to. 28 Oct 2026: the bench board was still on v8 and
+// nobody could tell.
 // v8.1: v8 pulled RX down to read the amp's power state from its TX line, and the
 // amp then went completely silent (28 Oct 2026 log: not one byte in four boots,
 // the line never read high). The amp evidently does not drive its TX line high
@@ -101,6 +104,10 @@
 // observed, not a measured limit, so it stays conservative until captured the same way.
 static const uint8_t MAX_MASTER = 0x3C;  // 60, the knob's own maximum
 static const uint8_t MAX_SUB    = 0x17;  // 23, highest seen - not a known limit
+
+// Shown by '?' (on its own line, for apps to parse), 'd', the boot log line and the
+// USB banner. Bump it with every change that is flashed.
+static const char *FW_VERSION = "8.2";
 
 HardwareSerial &scp = SCP_SERIAL;
 uint8_t master = 0, sub = 0;
@@ -637,8 +644,8 @@ void printDuration(uint32_t ms) {
 // until the supervision timeout expires, so a drop can lag the event by seconds.
 void showDiag() {
   uint32_t now = millis();
-  io.printf("name %s   connected %s   advertising %s\r\n",
-            deviceName, bleConnected ? "yes" : "no", advertising ? "yes" : "no");
+  io.printf("firmware v%s   name %s   connected %s   advertising %s\r\n",
+            FW_VERSION, deviceName, bleConnected ? "yes" : "no", advertising ? "yes" : "no");
   io.print("uptime ");  printDuration(now);
   io.printf("   connects %lu   drops %lu\r\n",
             (unsigned long)bleConnects, (unsigned long)bleDisconnects);
@@ -682,8 +689,9 @@ void handle(String line) {
       // with this firmware instead of hardcoding them.
       io.printf("r | e | h | m N | s N | i N | + | - | g N | t N | log | log clear | d | v 0/1"
                 "  (N decimal, or 0x.. hex)\r\n"
-                "master 0..%u, sub 0..%u, input 0..2\r\n",
-                MAX_MASTER, MAX_SUB);
+                "master 0..%u, sub 0..%u, input 0..2\r\n"
+                "firmware v%s\r\n",
+                MAX_MASTER, MAX_SUB, FW_VERSION);
       return;
     default: return;                               // ignore line noise
   }
@@ -754,7 +762,7 @@ void setup() {
   bootCount = prefs.getUInt("boots", 0) + 1;
   prefs.putUInt("boots", bootCount);
   logReady = LittleFS.begin(true);                 // formats the partition on first use
-  logEvent("boot: firmware v8.1, reset by %s%s", resetReason(), logReady ? "" : ", flash log unavailable");
+  logEvent("boot: firmware v%s, reset by %s%s", FW_VERSION, resetReason(), logReady ? "" : ", flash log unavailable");
 
   scp.begin(230400, SERIAL_8N1, PIN_RX, PIN_TX);
   // Pull RX UP. The amp's TX line needs it to read high between bytes, as the knob
@@ -763,7 +771,7 @@ void setup() {
   gpio_pulldown_dis((gpio_num_t)PIN_RX);
   gpio_pullup_en((gpio_num_t)PIN_RX);
   startBle();
-  Serial.printf("\r\nSCP bench v8.1 ready, advertising as \"%s\". '?' for help.\r\n", deviceName);
+  Serial.printf("\r\nSCP bench v%s ready, advertising as \"%s\". '?' for help.\r\n", FW_VERSION, deviceName);
   Serial.print("If you missed this banner, just type '?' - the console is live either way.\r\n");
 }
 
