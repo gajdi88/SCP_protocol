@@ -47,7 +47,7 @@ public class MainActivity extends Activity implements AmpService.Listener {
     static final int[] INPUT_COLORS = {0xFF3ECF7E, 0xFFF5C542, 0xFF4A9EFF};
     static final String[] INPUT_NAMES = {"Main", "Optical", "Extension"};
 
-    TextView nameView, volumeView, subView, statusView;
+    TextView nameView, volumeView, subView, statusView, versionView, fwWarning;
     SeekBar volumeBar, subBar;
     Button down, up;
     final Button[] inputs = new Button[3];
@@ -74,6 +74,15 @@ public class MainActivity extends Activity implements AmpService.Listener {
         nameView.setText("MATCH UP 8DSP");
         nameView.setPadding(0, 0, 0, dp(12));
         root.addView(nameView);
+
+        // Shown only for firmware known to be unable to work, so it cannot be missed.
+        fwWarning = text(13, 0xFFFF6B6B);
+        fwWarning.setText("The ESP32 runs firmware v8, which cannot hear the amp's replies: the "
+                + "levels never load and the controls stay disabled. Flash v8.1 or later "
+                + "(scp_bench.ino).");
+        fwWarning.setPadding(0, 0, 0, dp(12));
+        fwWarning.setVisibility(View.GONE);
+        root.addView(fwWarning);
 
         // ---- master volume
         LinearLayout vol = card(root);
@@ -173,11 +182,10 @@ public class MainActivity extends Activity implements AmpService.Listener {
         });
         root.addView(forget, full());
 
-        TextView version = text(11, DIM);
-        version.setGravity(Gravity.CENTER);
-        version.setPadding(0, dp(16), 0, 0);
-        version.setText("v" + versionName());
-        root.addView(version);
+        versionView = text(11, DIM);
+        versionView.setGravity(Gravity.CENTER);
+        versionView.setPadding(0, dp(16), 0, 0);
+        root.addView(versionView);
 
         ScrollView scroll = new ScrollView(this);
         scroll.setBackgroundColor(BG);
@@ -389,6 +397,9 @@ public class MainActivity extends Activity implements AmpService.Listener {
         String name = running ? s.deviceName() : null;
         nameView.setText(name != null ? "MATCH UP 8DSP  ·  " + name : "MATCH UP 8DSP");
         statusView.setText(running ? s.status : "Not connected");
+        String fw = running && s.ready ? (s.firmware != null ? s.firmware : "checking\u2026") : null;
+        versionView.setText("App v" + versionName() + (fw != null ? "  \u00b7  ESP32 firmware " + fw : ""));
+        fwWarning.setVisibility(running && s.firmwareBroken() ? View.VISIBLE : View.GONE);
 
         if (!live) {
             volumeView.setText("--");

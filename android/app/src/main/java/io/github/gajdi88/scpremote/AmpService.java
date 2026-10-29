@@ -107,6 +107,13 @@ public class AmpService extends Service {
     // Recognised from its help line, so older firmware keeps working without them.
     boolean supportsLog;
     boolean clockSent;
+
+    // The ESP32 firmware version: "v8.2" etc., or null until known. v8.2 and later
+    // say it in their help; older ones are recognised by what they print (fwProbe).
+    String firmware;
+
+    /** v8 pulled the RX pin down and cannot hear the amp's replies at all. */
+    boolean firmwareBroken() { return "v8".equals(firmware); }
     boolean wantHandshake, wantLog, logPending;
     StringBuilder logText;
     int logTotal;
@@ -360,6 +367,7 @@ public class AmpService extends Service {
         lineBuf.setLength(0);
         main.removeCallbacks(replyTimeout);
         main.removeCallbacks(retryRead);
+        main.removeCallbacks(fwProbe);
         if (logPending) finishLog(null, "The connection dropped during the download");
         wantHandshake = false;
         wantLog = false;
@@ -446,6 +454,7 @@ public class AmpService extends Service {
         ready = true;
         retry = 0;
         clockSent = false;
+        firmware = null;                    // the board may have been reflashed since
         setStatus("Reading the amp…");
         send("v 0", 'v');   // quiet mode: one line per command instead of four
         sendRaw("?");       // learn this firmware's ceiling; answered without OK
@@ -496,6 +505,9 @@ public class AmpService extends Service {
     };
 
     final Runnable retryRead = () -> { needRead = true; pump(); };
+
+    // 'd' answers with plain lines and no OK, so it goes out untracked.
+    final Runnable fwProbe = () -> { if (ready && firmware == null && !logPending) sendRaw("d"); };
 
     /** Send whatever is next: a read if one is due, else the newest wanted settings. */
     void pump() {
@@ -589,8 +601,20 @@ public class AmpService extends Service {
 
         // The help line names the commands this firmware has. "log" means v8 or
         // later, which also takes the phone's clock for its log timestamps.
+        // v8.2 and later: "firmware v8.2" from '?', "firmware v8.2   name ..." from 'd'.
+        if (line.startsWith("firmware v")) {
+            String v = line.substring(9).trim().split("\\s+")[0];
+            if (!v.equals(firmware)) { firmware = v; notifyUi(); }
+            return;
+        }
+        // Older firmware names no version, but its 'd' output differs: v8 reports
+        // "amp line up/down", v8.1 "amp answering yes/no".
+        if (firmware == null && line.startsWith("amp line ")) { firmware = "v8"; notifyUi(); return; }
+        if (firmware == null && line.startsWith("amp answering ")) { firmware = "v8.1"; notifyUi(); return; }
+
         if (line.startsWith("r | e")) {
             supportsLog = line.contains("log");
+            if (!supportsLog) firmware = "v7 or older";
             if (supportsLog && !clockSent) {
                 clockSent = true;
                 send("t " + System.currentTimeMillis() / 1000, 't');
@@ -621,6 +645,12 @@ public class AmpService extends Service {
                 if (known) installVolume();
             }
             maxSub = Integer.parseInt(m.group(2));
+            // v8.2 and later follow this line with their version. If none has come
+            // shortly, ask 'd', whose output tells v8 and v8.1 apart.
+            if (supportsLog && firmware == null) {
+                main.removeCallbacks(fwProbe);
+                main.postDelayed(fwProbe, 1500);
+            }
             notifyUi();
             return;
         }

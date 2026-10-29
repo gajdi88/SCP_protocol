@@ -54,6 +54,12 @@ not report its selected input.
 Both buttons need only the Bluetooth link. With older firmware they stay
 disabled and say so.
 
+The bottom line shows the app's version and the ESP32's firmware version.
+Firmware v8.2 and later report it themselves; older boards are recognised from
+what they print (v7 or older, v8, v8.1). Firmware v8 cannot hear the amp's
+replies, so with it the levels never load: the app shows a red warning to
+flash v8.1 or later.
+
 When the ESP32 reports the amp switching on, the app reads the levels again.
 If the amp refuses the first level read, the app keeps retrying every 3 s
 instead of leaving the controls disabled.
