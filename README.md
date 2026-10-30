@@ -209,15 +209,11 @@ the same, byte for byte and in the same order:
 The console prints `amp on` / `amp off` when that changes. The web app ignores
 these lines; the Android app re-reads the levels on `amp on`.
 
-**The ESP32's RX pin must be pulled up.** Firmware v8 pulled it down instead,
-to read the amp's power state from the line's idle level, and the amp then went
-completely silent: not one byte in four boots, and the line never read high
-(event log, 28 Oct 2026). The amp evidently does not drive its TX line high on
-its own; the knob provides the pull-up, and so does the ESP32's UART driver by
-default. v8.1 restores the pull-up and judges the amp by whether it answers.
-The internal pull-up is weak (about 45 kΩ). If replies are ever garbled, a
-10 kΩ resistor from the ESP32's 3.3 V to its RX pin makes it as firm as the
-knob's.
+**The ESP32's RX pin is pulled up,** as in every setup proven in September.
+Firmware v8 pulled it down instead, to read the amp's power state from the
+line's idle level, and v8.1 put the pull-up back. That change was **not** the
+cause of the amp's silence in the car, though: it stayed silent under v8.2 too.
+The open diagnosis is in [`diagnosis-test-plan.md`](diagnosis-test-plan.md).
 
 Because the ESP32 only sends when asked, with no app connected nothing tells
 it the amp has come up, so the handshake waits for the first command. Sensing

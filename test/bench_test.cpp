@@ -173,7 +173,7 @@ int main(){
   ck(has(o,"OK") && amp.master == 22, "and the write lands");
 
   section("the amp going away and coming back (v8.1)");
-  // v8 pulled RX down and the real amp fell silent: its TX line needs a pull-up.
+  // RX is pulled up, as in every setup proven in September (v8 pulled it down).
   ck(g_pullUp[PIN_RX] && !g_pullDown[PIN_RX], "RX is pulled up, not down");
   handle(String("r")); usb();
   ck(ampAnswering, "an answering amp counts as there");

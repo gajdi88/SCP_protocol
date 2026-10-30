@@ -49,8 +49,8 @@ regexes there have changed, so the JavaScript copies cannot silently rot.
   keys in memory. They prove what the log writes and when it rotates, not how the
   flash wears or behaves on a power cut.
 - **Electrical pull-ups.** `shim/driver/gpio.h` only records which pulls the
-  sketch asked for. That RX must be pulled up came from the real amp going
-  silent under v8's pull-down; the test only stops that change coming back.
+  sketch asked for. RX is pulled up as in every setup proven in September; the
+  test only stops v8's pull-down coming back, and proves nothing electrical.
 - **Wiring and electrical behaviour.** That is what `amp_sim` and a DMM are for.
 
 ## Layout
