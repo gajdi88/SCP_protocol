@@ -15,7 +15,7 @@ master volume, subwoofer level and input selection — and, as of 19 Sep 2026,
 | [`conductor-scp-protocol.md`](conductor-scp-protocol.md) | The protocol specification: physical layer, framing, checksum, registers, write-enable, power-up handshake, open questions | Framing, checksum, level, input-select and write-enable **confirmed on hardware**; boot register meanings partly guessed |
 | [`scp_bench/scp_bench.ino`](scp_bench/scp_bench.ino) | Arduino sketch: ESP32 acts as the knob, driven from an identical console over **USB serial and BLE** | **Working against a real amp.** Read, write-enable, master, sub and input all verified |
 | [`app/`](app/) | Single-screen Web Bluetooth dashboard for Android: volume, sub and input | **Working.** Served from GitHub Pages, added to the home screen as a PWA |
-| [`diagnosis-test-plan.md`](diagnosis-test-plan.md) | Proposed tests to find out why the real amp gives the ESP32 no reply, when the simulator works: multimeter, harness, back-powering, and logic analyser runs under four power-up orders | **Proposed, not yet run** |
+| [`diagnosis-test-plan.md`](diagnosis-test-plan.md) | Proposed tests to find out why the real amp gives the ESP32 no reply, when the simulator works: multimeter, harness, the amp's 3.3 V under the H2's load, and logic analyser runs under three start-up orders | **Proposed, not yet run** |
 | [`test/`](test/) | Host tests: compiles both sketches against a stubbed ESP32 and a simulated amp. `./test/run.sh`, about a second, no hardware | 114 C++ checks plus 20 JavaScript; run on every relevant change by the Firmware workflow |
 | [`amp_sim/`](amp_sim/) | A second ESP32 that pretends to be the amplifier, for testing changes with no amp and no speakers | **Conformance-tested** against every captured frame in the spec |
 | [`usb_hello/usb_hello.ino`](usb_hello/usb_hello.ino) | Isolation test: USB console only, no BLE or UART. Proves a board can print and receive before anything else is debugged | Diagnostic tool |
@@ -135,12 +135,17 @@ or the cable side instead, so check your orientation.
 The series resistors are what make a wiring mistake survivable: within the
 3.3 V domain, worst-case contention current is ~3.3 mA, safe on both ends.
 
-**The car install currently has no series resistors** (29 Oct 2026): the ESP32's
-pins go straight to the amp's. A swapped wire, or the knob and the ESP32 on ARX
-together, is then a direct short between two outputs. With the amp off, nothing
-limits the current from the ESP32's TX into the amp's ARX pin. That can feed
-power into the unpowered amp. See
-[`diagnosis-test-plan.md`](diagnosis-test-plan.md), test 3.
+**The car install differs from this bench wiring** (30 Oct 2026):
+
+- **The ESP32-H2 is powered from the 3V3 pin**, like the knob, so it only runs
+  while the amp's remote supply is on.
+- **There are no series resistors.** A swapped wire, or the knob and the ESP32 on
+  ARX together, is then a direct short between two outputs.
+- **Never plug USB into the H2 while it is wired to the amp's 3V3.** That ties
+  the board's USB regulator to the amp's supply, and powers the amp's remote side
+  even with the amp off.
+
+See [`diagnosis-test-plan.md`](diagnosis-test-plan.md).
 
 Before connecting, DMM every Micro-Fit pin against ground with the amp powered.
 You should find exactly two data lines near 3.3 V, one 3.3 V rail and one
