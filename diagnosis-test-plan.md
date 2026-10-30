@@ -78,6 +78,54 @@ short between two outputs. **Never plug in the knob and the H2 together,** and
 do not swap wires as a test. Adding 1 kΩ in each data line is recommended
 afterwards, but the tests below are for the install as it is.
 
+## What the original measurements already settle
+
+`conductor-scp-protocol.md` records what was measured in September, with the
+WROOM-32 and the logic analyser. Those measurements are more reliable than
+anything remembered since, so every theory is checked against them first.
+
+### Measured facts
+
+| # | Fact | Source |
+|---|---|---|
+| M1 | The amp answers reads **without any handshake**: the very first read in the replay session, knob unplugged, returned the levels | spec §4b, §9 replay session |
+| M2 | **After an amp power-cycle with no knob attached**, and the ESP32 left running on its own power, the amp still answered. The write was answered with the rejection frame, which is a reply | spec §4b, §9 |
+| M3 | In the power-up capture, the **amp's TX (ATX) went high at 4.26 s**. The knob's TX went high at 5.28 s, and the handshake followed within 1 ms | spec §5 |
+| M4 | The amp answers 54–467 µs after a request. It never speaks unprompted | spec §1, §3 |
+| M5 | The ESP32 heard every reply using **only its internal pull-up** on RX, with 1 kΩ in each line | spec §7, §9 (firmware v3–v7) |
+| M6 | Hot-swapping worked: knob removed with the amp running, ESP32 connected, levels read back | spec §9, 27 Sep |
+| M7 | The proven setup differs from the car install: WROOM-32 on GPIO16/17, **separately powered**, **1 kΩ resistors**, amp's 3V3 left unconnected | spec §7 |
+
+And from the H2's own log in October:
+
+| # | Fact |
+|---|---|
+| L1 | Under v8.2 (RX pulled up), **not a single byte** arrived in any session: every failure is "silence", not garbage |
+| L2 | Under v8 (RX pulled down), the line **never read high for 1 s**: "amp line up" was never logged |
+| L3 | The same H2 and v8.2 work perfectly against `amp_sim`, wired with jumpers to GPIO4/5 |
+
+### The theories, against those facts
+
+| Theory | Verdict | Why |
+|---|---|---|
+| The amp needs the knob's handshake at start-up before it answers | **Contradicted** | M1: it answered a read before any handshake. M2: after a power-cycle with no knob, it still answered |
+| The ESP32 back-powers the amp and upsets its start-up | **Does not apply, and contradicted** | The H2 is powered by the amp. M2: the WROOM, powered separately during the amp's power-cycle, did not stop the amp answering |
+| ATX is open-drain and needs a stronger pull-up | **Unlikely** | M3: ATX went high a second before the knob's processor started, so it was not the knob's pull-up. M5: the internal pull-up was always enough. L1: an open-drain line with a weak pull-up gives garbled bytes, not total silence |
+| v8's pull-down silenced the amp | **Not the explanation** | It was a real change, but L1 shows total silence again with the pull-up back. And with a driven ATX, L2 means the line was not reaching GPIO4 then either |
+| **ATX does not reach GPIO4 in the car harness** (open wire, bad contact, wrong pad) | **Consistent with everything** | L1, L2 and L3 together: the H2's RX works on jumpers but sees nothing in the car. A pin on this connector has come loose before |
+| **The amp's 3V3 cannot carry the H2** | **Consistent, untested** | M7: no proven session ran the ESP32 from the amp. A sagging supply could stop the amp's remote interface transmitting, without stopping it receiving |
+| The amp's remote interface is not transmitting at all (off, standby, a setting) | **Possible, untested** | Nothing measured since September shows the amp transmitting. Test 4a settles it |
+
+So the tests that matter most are, in order:
+
+1. **Test 2**, especially continuity from the ATX pin to the GPIO4 pad;
+2. **test 4a**, to see whether the amp transmits to the knob today;
+3. **test 3** and **test 4b**, for the supply.
+
+The start-up orders in test 5 matter much less, since the start-up theories are
+contradicted by M1 and M2. Run 5a as the normal case. Run 5b and 5c only if
+everything else passes and 5a still fails.
+
 ## What you need
 
 - A multimeter, with continuity (beep) mode, and ideally min/max recording to
@@ -119,7 +167,7 @@ no H2.
 | 3V3 ≈ 3.3 V | You are on the right pins, and the amp's remote supply is on |
 | Any pin ≈ 12 V | **Stop.** The pinout or orientation is wrong |
 | ATX ≈ 3.3 V | The amp drives its TX line high itself (push-pull). No pull-up is needed |
-| ATX ≈ 0 V | The amp only pulls ATX low and relies on a pull-up elsewhere (open-drain). The H2's weak internal pull-up may not be enough |
+| ATX ≈ 0 V | Unexpected, given M3. Either the amp's remote interface is not running, or ATX only pulls low. Check that 3V3 is really on |
 | ATX between 0.5 and 2.8 V | A weak or floating line. Note the value |
 
 Then **repeat with the knob plugged in**, measuring at the breakout taps. If ATX
@@ -252,6 +300,9 @@ For each run, read the three sources side by side:
 | Correct frames | **Nothing** | "silence" | **The amp does not answer the H2.** Compare the variants |
 | Missing or garbled frames | — | — | **The H2's TX does not reach the amp properly.** Check the ARX wire, and that GPIO5 is the pad you think it is |
 
+Only run 5b and 5c if tests 2, 3 and 4a passed and 5a still fails: M1 and M2
+already contradict the start-up theories they test.
+
 The pattern across 5a–5c is the diagnosis:
 
 - **5a fails, 5b and 5c work:** the amp minds the H2 being attached while it
@@ -299,13 +350,14 @@ confirm it. Only then change anything else. Expected fixes, depending on
 the result:
 
 - **A broken wire, a bad contact or the wrong pad:** repair, then test 5 again.
-- **ATX needs a pull-up:** 10 kΩ from the Micro-Fit 3V3 pin to ATX, as the knob
-  presumably has.
+- **ATX needs a pull-up** (unlikely, see M3 and M5): 10 kΩ from the Micro-Fit
+  3V3 pin to ATX.
 - **The H2 overloads the amp's 3.3 V:** power the H2 from the car's 12 V through
   a small regulator. Keep its start tied to the amp's, for example by switching
   that regulator from the amp's remote (REM) line, so the H2 still never runs
   while the amp is off.
-- **The amp needs a greeting at start-up:** a firmware change. Because the H2
+- **The amp needs a greeting at start-up** (contradicted by M1 and M2, so
+  unlikely): a firmware change. Because the H2
   starts when the amp's remote supply comes on, its own boot *is* the amp's
   power-up. So it can send the handshake 1 s after booting, exactly as the knob
   does, without waiting for an answer first.

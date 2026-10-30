@@ -42,12 +42,11 @@
 // v8.2: reports its own version, in '?' and 'd', so an app can show which
 // firmware it is talking to. 28 Oct 2026: the bench board was still on v8 and
 // nobody could tell.
-// v8.1: v8 pulled RX down to read the amp's power state from its TX line, and the
-// amp then went completely silent (28 Oct 2026 log: not one byte in four boots,
-// the line never read high). The amp evidently does not drive its TX line high
-// itself; the knob, and the RX pull-up v7 inherited from the UART driver, do. So
-// RX is pulled up again, and "the amp came up" is now judged by the amp starting
-// to answer after silence, which then triggers the handshake.
+// v8.1: v8 pulled RX down to read the amp's power state from its TX line. RX is
+// pulled up again, as in every setup proven in September, and "the amp came up"
+// is now judged by the amp starting to answer after silence, which then triggers
+// the handshake. (The amp's silence in the car on 28-29 Oct persisted under
+// v8.2, so the pull-down was not its cause: see diagnosis-test-plan.md.)
 // v8: behaves like the knob at amp power-up. The amp's TX line is watched; once
 // it has been high for a second (the knob's own delay, spec section 5) the full
 // handshake is replayed: reads of 00, 03, 04, 05, 06, 07, 09, then the enable. A
@@ -765,9 +764,8 @@ void setup() {
   logEvent("boot: firmware v%s, reset by %s%s", FW_VERSION, resetReason(), logReady ? "" : ", flash log unavailable");
 
   scp.begin(230400, SERIAL_8N1, PIN_RX, PIN_TX);
-  // Pull RX UP. The amp's TX line needs it to read high between bytes, as the knob
-  // provides; v8's pull-down silenced the amp entirely (see v8.1 at the top). The
-  // UART driver normally sets this already; it is stated here so nothing undoes it.
+  // Pull RX up, as in every setup proven in September. The UART driver normally
+  // sets this already; it is stated here so nothing undoes it (v8 did).
   gpio_pulldown_dis((gpio_num_t)PIN_RX);
   gpio_pullup_en((gpio_num_t)PIN_RX);
   startBle();
