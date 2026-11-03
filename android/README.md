@@ -32,6 +32,21 @@ To give the volume buttons back to the phone, tap **Stop** in the notification
 or the app. If the link drops, the buttons revert to the phone until it
 reconnects; it retries by itself, backing off to every 30 s while the amp is off.
 
+### Landscape
+
+Turn the phone sideways and the screen becomes a small mixing desk:
+
+- **Two tall faders**, volume and subwoofer, side by side on the left. Each has
+  its level in large figures and big **+ / −** buttons beside it.
+- **A panel on the right** with the amp and Connect/Stop at the top, then the
+  input buttons, the status line, the amp tools and the version. It scrolls if
+  the phone is short.
+
+A fader moves by **how far you drag**, not to where your finger lands. Touching
+the top of a fader does not jump the amp to full volume: only dragging changes
+the level, and a full-height drag covers the whole range. Rotating keeps the
+connection and any log download running. Portrait is unchanged.
+
 The input buttons show what the app last sent, as in the web app: the amp does
 not report its selected input.
 
